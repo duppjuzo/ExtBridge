@@ -222,7 +222,7 @@ public class TouchpadActivity extends Activity {
         topWrap.addView(mTvHint);
 
         mTvInjectWarn = new TextView(this);
-        mTvInjectWarn.setText("⚠ 点击/输入注入被系统拒绝 (INJECT_EVENTS)：请在「开发者选项」开启「USB 调试（安全设置）/ 允许模拟点击」");
+        mTvInjectWarn.setText("⚠ 点击/输入注入被系统拒绝 (INJECT_EVENTS)：" + BridgeClient.getOemInjectHint());
         mTvInjectWarn.setTextColor(0xFFFCA5A5);
         mTvInjectWarn.setBackgroundColor(0xFF7F1D1D);
         mTvInjectWarn.setTextSize(11.5f);
@@ -316,10 +316,8 @@ public class TouchpadActivity extends Activity {
             updateOrientationLayout();
         });
 
-        TextView btnSideCtrl = makeBtn("🪞 副屏直控", 0xFF0F766E);
-        btnSideCtrl.setOnClickListener(v -> startActivity(
-                new Intent(this, SideControlActivity.class)
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP)));
+        TextView btnBlackout = makeBtn("🌙 一键黑屏", 0xFF0F766E);
+        btnBlackout.setOnClickListener(v -> BridgeService.toggleBlackoutFromApp(this));
 
         TextView btnIme = makeBtn("⌨ 键盘", 0xFF0284C7);
         btnIme.setOnClickListener(v -> toggleImeDock(!mImeVisible));
@@ -331,7 +329,7 @@ public class TouchpadActivity extends Activity {
         bar.addView(mBtnReach);
         View spacer = new View(this);
         bar.addView(spacer, new LinearLayout.LayoutParams(0, 1, 1f));
-        bar.addView(btnSideCtrl);
+        bar.addView(btnBlackout);
         bar.addView(btnIme);
         barScroll.addView(bar, new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));

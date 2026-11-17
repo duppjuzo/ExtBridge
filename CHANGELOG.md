@@ -4,6 +4,15 @@
 
 ---
 
+## v3.4.2-lite (`versionCode: 21`, `lite` 高兼容分支) — 2026-11-18
+
+### 🌿 跨品牌系统高兼容纯净分支构建
+- **基于 `v3.4.2` 完整保留核心生产力特性**：保留 **DeX 独立扩展桌面**、**DeX 自由分屏（左右/上下可拖拽）**、**Dock 自动隐藏**、**主屏一键黑屏最低亮度省电**（并在主控制台与触摸板新增快捷黑屏按钮）、**`21:9` 带鱼屏与 EDID 最优分辨率自适应**、**防工作台悬浮小窗劫持保护** 及 **纯净原生镜像无缝切换**。
+- **彻底剥离镜像副屏高耦合链路**：移除第二虚拟屏 `sSideVd`、镜像信息侧边栏、`AppWidget` 宿主绑定、`getCursorPositionInLogicalDisplay` 光标轮询、边缘鼠标捕获 (`SideMouseCaptureActivity` / `SideControlActivity`)、周期性 `dumpsys audio/media_session` 解析及小米 `com.miui.home` 强停逻辑，消除跨 ROM 隐藏接口兼容隐患与后台轮询开销。
+- **增强多品牌 Android 11–16 适配**：`IActivityTaskManager.startActivity` 支持 10/11 参数双签名反射与 `am start --display` 命令兜底；输入注入拦截提示自动适配小米 HyperOS、OPPO/一加 ColorOS（「禁止权限监控」）与 vivo OriginOS。详见 [`docs/RELEASE_v3.4.2-lite.md`](docs/RELEASE_v3.4.2-lite.md)。
+
+---
+
 ## v3.4.2 (`versionCode: 21`) — 2026-11-18
 
 ### 🐛 关键兼容修复：小米平板工作台小窗劫持防护 & 21:9 带鱼屏原生适配
@@ -44,7 +53,7 @@
   - 增加 `mDestroyed`、`mPollSeq` 序号守卫与 `safeBgExecute` / `safePost`；`detachExtOverlays(boolean keepBlackout)` 防止切层误撤黑屏；`BridgeProvider` 限制调用方 UID 白名单；`BridgeClient` 改用 `CopyOnWriteArraySet` 与 `linkToDeath` / `pingBinder()`；`MainActivity`、`TouchpadActivity` 与 `LauncherActivity` 在生命周期结束移除监听；`TouchpadActivity` 鼠标移动合并异步节流；`ControlReceiver` 使用 `goAsync()` 异步响应并在 `AndroidManifest.xml` 补齐 11 项 Action 声明。
 
 ### 📚 图文文档与发布构建
-- 新增完整实机截图集 [`docs/images/`](docs/images/)（11 张实机全流程截图）、完整图文使用说明书 [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md)、更新 [README.md](README.md) 与发布说明 [`docs/RELEASE_v3.4.1.md`](docs/RELEASE_v3.4.1.md)。
+- 新增完整实机截图集 [`docs/images/`](docs/images/)、完整图文使用说明书 [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) 与更新 [README.md](README.md)（主线发布说明见 `main` 分支 `docs/RELEASE_v3.4.1.md`）。
 
 ---
 

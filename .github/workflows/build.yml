@@ -5,12 +5,14 @@ on:
     branches:
       - main
       - master
+      - lite
     tags:
       - 'v*'
   pull_request:
     branches:
       - main
       - master
+      - lite
   workflow_dispatch:
     inputs:
       create_release:
