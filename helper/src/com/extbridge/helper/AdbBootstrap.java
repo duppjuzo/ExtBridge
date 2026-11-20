@@ -18,6 +18,7 @@ import android.util.Log;
 
 import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -336,23 +337,23 @@ public final class AdbBootstrap {
     }
 
     public static String buildPcAdbCommand() {
-        // Zero '$', zero backticks, zero escaped inner quotes: runs identically in Bash, Zsh, sh, PowerShell, and cmd.exe!
+        // Zero '$', zero backticks, zero escaped inner quotes, zero Toybox-incompatible `unzip -t`:
+        // runs identically in Bash, Zsh, sh, PowerShell, and cmd.exe across Android 11-16!
         return "adb shell \"rm -f /data/local/tmp/extb_src.apk /data/local/tmp/extbridge.jar.new && "
-                + "pm path com.extbridge.helper | cut -d: -f2 | head -n1 | xargs cat > /data/local/tmp/extb_src.apk && "
+                + "pm path com.extbridge.helper | grep '^package:' | cut -d: -f2 | head -n1 | xargs cat > /data/local/tmp/extb_src.apk && "
                 + "test -s /data/local/tmp/extb_src.apk && "
                 + "unzip -p /data/local/tmp/extb_src.apk assets/extbridge.jar > /data/local/tmp/extbridge.jar.new && "
                 + "rm -f /data/local/tmp/extb_src.apk && "
                 + "test -s /data/local/tmp/extbridge.jar.new && "
-                + "unzip -tq /data/local/tmp/extbridge.jar.new >/dev/null 2>&1 && "
                 + "chmod 644 /data/local/tmp/extbridge.jar.new && "
                 + "timeout 6 env CLASSPATH=/data/local/tmp/extbridge.jar.new app_process /data/local/tmp com.extbridge.daemon.ExtBridge --verify-helper >/dev/null 2>&1 && "
                 + "(timeout 8 env CLASSPATH=/data/local/tmp/extbridge.jar.new app_process /data/local/tmp com.extbridge.daemon.ExtBridge --stop >/dev/null 2>&1 || true) && "
-                + "(pgrep -f '^app_process.*ExtBridge' >/dev/null 2>&1 && (pkill -f '^app_process.*ExtBridge' 2>/dev/null || true) && sleep 1 && (pkill -f -l KILL '^app_process.*ExtBridge' 2>/dev/null || true) || true) && "
+                + "((pgrep -f '^app_process.*ExtBridge' >/dev/null 2>&1 || pgrep -f '^/system/bin/app_process.*ExtBridge' >/dev/null 2>&1) && (pkill -f '^app_process.*ExtBridge' 2>/dev/null; pkill -f '^/system/bin/app_process.*ExtBridge' 2>/dev/null; true) && sleep 1 && (pkill -f -l KILL '^app_process.*ExtBridge' 2>/dev/null; pkill -f -l KILL '^/system/bin/app_process.*ExtBridge' 2>/dev/null; true) || true) && "
                 + "rm -f /data/local/tmp/extbridge.jar && "
                 + "mv -f /data/local/tmp/extbridge.jar.new /data/local/tmp/extbridge.jar && "
                 + "test -s /data/local/tmp/extbridge.jar && "
-                + "appops set com.extbridge.helper SYSTEM_ALERT_WINDOW allow && "
-                + "appops set com.extbridge.helper RUN_ANY_IN_BACKGROUND allow && "
+                + "(appops set com.extbridge.helper SYSTEM_ALERT_WINDOW allow 2>/dev/null || true) && "
+                + "(appops set com.extbridge.helper RUN_ANY_IN_BACKGROUND allow 2>/dev/null || true) && "
                 + "(appops set com.extbridge.helper 10021 allow 2>/dev/null || true) && "
                 + "(appops set com.extbridge.helper ACCESS_RESTRICTED_SETTINGS allow 2>/dev/null || true) && "
                 + "(pm grant com.extbridge.helper android.permission.POST_NOTIFICATIONS 2>/dev/null || true) && "
@@ -614,11 +615,46 @@ public final class AdbBootstrap {
         }
 
         postStep(listener, "已连接！正在释放 extbridge.jar 并授权启动守护进程...");
-        String expectedSha = computeAssetJarSha256(appCtx);
-        String bootstrapCmd = buildDaemonBootstrapScript(null, expectedSha);
+        String[] staged = stageBridgeJarWithSha256(appCtx);
+        String localStagePath = (staged != null) ? staged[0] : null;
+        String expectedSha = (staged != null && staged[1] != null) ? staged[1] : computeAssetJarSha256(appCtx);
+        String remoteTmp = "/data/local/tmp/extb_" + randomHex16() + ".jar";
+        boolean pushedOk = false;
 
-        CmdRes shRes = runAdb(appCtx, 22000, "-s", target, "shell", bootstrapCmd);
+        if (localStagePath != null) {
+            File stageFile = new File(localStagePath);
+            if (stageFile.isFile() && stageFile.length() > 0) {
+                // Tier 1: Direct `adb push` via SYNC protocol — completely bypasses `pm path`, `/data/app` SELinux,
+                // Xiaomi Second Space / Split APKs, and Toybox `unzip` quirks!
+                CmdRes pushRes = runAdb(appCtx, 15000, "-s", target, "push", localStagePath, remoteTmp);
+                if (pushRes.code == 0) {
+                    pushedOk = true;
+                } else {
+                    // Tier 2: Raw stdin stream into `cat > remoteTmp`
+                    CmdRes pipeRes = runAdbWithStdinFile(
+                            appCtx,
+                            15000,
+                            stageFile,
+                            "-s", target, "shell",
+                            "rm -f '" + remoteTmp + "' 2>/dev/null; umask 022; set -C; cat > '" + remoteTmp + "'");
+                    if (pipeRes.code == 0) {
+                        pushedOk = true;
+                    }
+                }
+            }
+        }
+
+        int myUserId = Math.max(0, android.os.Process.myUid() / 100000);
+        String fallbackExtract = buildMultiApkUnzipFallback(myUserId, "'" + remoteTmp + "'");
+        String bootstrapCmd = (pushedOk
+                ? ("if [ ! -f '" + remoteTmp + "' ] || [ -L '" + remoteTmp + "' ] || [ ! -s '" + remoteTmp + "' ]; then "
+                        + "rm -f '" + remoteTmp + "' 2>/dev/null; " + fallbackExtract + "; fi; ")
+                : ("rm -f '" + remoteTmp + "' 2>/dev/null; " + fallbackExtract + "; "))
+                + buildShellSwapAndLaunchScript("'" + remoteTmp + "'", expectedSha);
+
+        CmdRes shRes = runAdb(appCtx, 24000, "-s", target, "shell", bootstrapCmd);
         if (shRes.code != 0 || shRes.output == null || !shRes.output.contains("LAUNCH_DONE")) {
+            try { runAdb(appCtx, 2000, "-s", target, "shell", "rm -f '" + remoteTmp + "' 2>/dev/null"); } catch (Throwable ignored) {}
             postResult(listener, false, "远程 Shell 启动失败:\n" + shRes.output);
             return;
         }
@@ -698,6 +734,24 @@ public final class AdbBootstrap {
         }
     }
 
+    private static String randomHex16() {
+        byte[] rnd = new byte[8];
+        new SecureRandom().nextBytes(rnd);
+        StringBuilder sb = new StringBuilder(16);
+        for (byte b : rnd) {
+            sb.append(String.format(Locale.US, "%02x", b & 0xff));
+        }
+        return sb.toString();
+    }
+
+    private static String buildMultiApkUnzipFallback(int userId, String dstExpr) {
+        return "for p in $(pm path --user " + userId + " com.extbridge.helper 2>/dev/null | sed -n 's/^package://p' | tr -d '\\r') "
+                + "$(pm path com.extbridge.helper 2>/dev/null | sed -n 's/^package://p' | tr -d '\\r'); do "
+                + "if [ -n \"$p\" ] && [ -f \"$p\" ] && [ ! -L \"$p\" ]; then "
+                + "unzip -p \"$p\" assets/extbridge.jar > " + dstExpr + " 2>/dev/null; "
+                + "[ -s " + dstExpr + " ] && break; fi; done";
+    }
+
     public static void rootBootstrapAsync(final Context ctx, final boolean markAutoRoot, final ProgressListener listener) {
         final Context appCtx = ctx.getApplicationContext();
         sExec.execute(() -> {
@@ -709,18 +763,13 @@ public final class AdbBootstrap {
             }
             String qStage = staged[0].replace("'", "");
             String expSha = staged[1].toLowerCase(Locale.US);
-            byte[] rnd = new byte[8];
-            new SecureRandom().nextBytes(rnd);
-            StringBuilder nonce = new StringBuilder(16);
-            for (byte b : rnd) {
-                nonce.append(String.format(Locale.US, "%02x", b & 0xff));
-            }
+            int myUserId = Math.max(0, android.os.Process.myUid() / 100000);
             // Literal cryptographic-nonce path avoids environment variable wiping across `su 2000`
-            String rootTmp = "/data/local/tmp/extb_" + nonce + ".jar";
+            String rootTmp = "/data/local/tmp/extb_" + randomHex16() + ".jar";
             String shellInner = buildShellSwapAndLaunchScript("'" + rootTmp + "'", expSha);
             String qShellInner = shellInner.replace("'", "'\\''");
             // Root ONLY populates an O_CREAT|O_EXCL (`set -C`) temp jar verified against expSha
-            // (with automatic `pm path` fallback when Magisk/KernelSU Mount Namespace is Isolated),
+            // (with automatic multi-user/multi-split `pm path` fallback when Magisk/KernelSU Mount Namespace is Isolated),
             // chowns it 2000:2000, and transitions to uid 2000 (`u:r:shell:s0`) before running app_process!
             String script = "UID_NOW=$(id -u 2>/dev/null || echo -1); "
                     + "if [ \"$UID_NOW\" != \"0\" ]; then echo NO_ROOT:$UID_NOW; exit 12; fi; "
@@ -730,12 +779,10 @@ public final class AdbBootstrap {
                     + "cat '" + qStage + "' > '" + rootTmp + "' 2>/dev/null; fi; "
                     + "SRC_SHA=$(sha256sum '" + rootTmp + "' 2>/dev/null | cut -d' ' -f1); "
                     + "if [ \"$SRC_SHA\" != '" + expSha + "' ]; then "
-                    + "APK=$(pm path com.extbridge.helper 2>/dev/null | head -n1 | cut -d: -f2); "
-                    + "if [ -n \"$APK\" ] && [ -f \"$APK\" ] && [ ! -L \"$APK\" ]; then "
-                    + "unzip -p \"$APK\" assets/extbridge.jar > '" + rootTmp + "' 2>/dev/null; fi; "
+                    + buildMultiApkUnzipFallback(myUserId, "'" + rootTmp + "'") + "; "
                     + "SRC_SHA=$(sha256sum '" + rootTmp + "' 2>/dev/null | cut -d' ' -f1); "
                     + "fi; "
-                    + "if [ \"$SRC_SHA\" != '" + expSha + "' ] || ! unzip -tq '" + rootTmp + "' >/dev/null 2>&1; then "
+                    + "if [ \"$SRC_SHA\" != '" + expSha + "' ] || [ \"$(dd if='" + rootTmp + "' bs=1 count=2 2>/dev/null)\" != \"PK\" ]; then "
                     + "rm -f '" + rootTmp + "' 2>/dev/null; echo ERR_STAGE_HASH:$SRC_SHA; exit 21; fi; "
                     + "chmod 644 '" + rootTmp + "' && chown -h 2000:2000 '" + rootTmp + "' "
                     + "|| { rm -f '" + rootTmp + "' 2>/dev/null; echo ERR_STAGE_CHOWN; exit 21; }; "
@@ -798,23 +845,25 @@ public final class AdbBootstrap {
         String shaGuard = cleanSha.matches("^[0-9a-f]{64}$")
                 ? ("ACT_SHA=$(sha256sum " + tmpJarExpr + " 2>/dev/null | cut -d' ' -f1); "
                         + "if [ -n \"$ACT_SHA\" ] && [ \"$ACT_SHA\" != '" + cleanSha + "' ]; then "
-                        + "rm -f " + tmpJarExpr + "; echo ERR_JAR_SHA256; exit 21; fi; ")
+                        + "rm -f " + tmpJarExpr + "; echo ERR_JAR_SHA256:$ACT_SHA; exit 21; fi; ")
                 : "";
         String postSwapShaGuard = cleanSha.matches("^[0-9a-f]{64}$")
                 ? ("FINAL_SHA=$(sha256sum /data/local/tmp/extbridge.jar 2>/dev/null | cut -d' ' -f1); "
                         + "if [ -n \"$FINAL_SHA\" ] && [ \"$FINAL_SHA\" != '" + cleanSha + "' ]; then "
-                        + "echo ERR_FINAL_SHA256; exit 22; fi; ")
+                        + "echo ERR_FINAL_SHA256:$FINAL_SHA; exit 22; fi; ")
                 : "";
-        return "if [ ! -f " + tmpJarExpr + " ] || [ -L " + tmpJarExpr + " ] || [ ! -s " + tmpJarExpr + " ] "
-                + "|| ! unzip -tq " + tmpJarExpr + " >/dev/null 2>&1; then "
-                + "rm -f " + tmpJarExpr + "; echo ERR_STAGE_JAR; exit 21; fi; "
+        String aliveExpr = "(pgrep -f '^app_process.*ExtBridge' >/dev/null 2>&1 || pgrep -f '^/system/bin/app_process.*ExtBridge' >/dev/null 2>&1)";
+        return "if [ ! -f " + tmpJarExpr + " ] || [ -L " + tmpJarExpr + " ] || [ ! -s " + tmpJarExpr + " ]; then "
+                + "rm -f " + tmpJarExpr + "; echo ERR_STAGE_EMPTY; exit 21; fi; "
+                + "if [ \"$(dd if=" + tmpJarExpr + " bs=1 count=2 2>/dev/null)\" != \"PK\" ]; then "
+                + "rm -f " + tmpJarExpr + "; echo ERR_STAGE_NOT_ZIP; exit 21; fi; "
                 + shaGuard
                 + "chmod 644 " + tmpJarExpr + " || { rm -f " + tmpJarExpr + "; echo ERR_CHMOD_JAR; exit 21; }; "
                 + "(CLASSPATH=" + tmpJarExpr + " /system/bin/app_process /data/local/tmp com.extbridge.daemon.ExtBridge --stop >/dev/null 2>&1 || true); "
-                + "if pgrep -f '^(/.*/)?app_process.*ExtBridge' >/dev/null 2>&1; then "
-                + "(pkill -f '^(/.*/)?app_process.*ExtBridge' 2>/dev/null || true); "
+                + "if " + aliveExpr + "; then "
+                + "(pkill -f '^app_process.*ExtBridge' 2>/dev/null; pkill -f '^/system/bin/app_process.*ExtBridge' 2>/dev/null; true); "
                 + "sleep 1.0; "
-                + "(pkill -f -l KILL '^(/.*/)?app_process.*ExtBridge' 2>/dev/null || true); fi; "
+                + "(pkill -f -l KILL '^app_process.*ExtBridge' 2>/dev/null; pkill -f -l KILL '^/system/bin/app_process.*ExtBridge' 2>/dev/null; true); fi; "
                 + "rm -f /data/local/tmp/extbridge.jar; "
                 + "if ! mv -f " + tmpJarExpr + " /data/local/tmp/extbridge.jar || [ -L /data/local/tmp/extbridge.jar ] || [ ! -s /data/local/tmp/extbridge.jar ]; then "
                 + "rm -f " + tmpJarExpr + "; echo ERR_SWAP_JAR; exit 22; fi; "
@@ -837,12 +886,12 @@ public final class AdbBootstrap {
                 + "(CLASSPATH=/data/local/tmp/extbridge.jar setsid /system/bin/app_process /data/local/tmp com.extbridge.daemon.ExtBridge </dev/null >>\"$LOG_DST\" 2>&1 &); sleep 0.5 ;; "
                 + "*) "
                 + "(CLASSPATH=/data/local/tmp/extbridge.jar setsid runcon u:r:shell:s0 /system/bin/app_process /data/local/tmp com.extbridge.daemon.ExtBridge </dev/null >>\"$LOG_DST\" 2>&1 &); sleep 0.5; "
-                + "if ! pgrep -f '^(/.*/)?app_process.*ExtBridge' >/dev/null 2>&1; then "
+                + "if ! " + aliveExpr + "; then "
                 + "(CLASSPATH=/data/local/tmp/extbridge.jar setsid /system/bin/app_process /data/local/tmp com.extbridge.daemon.ExtBridge </dev/null >>\"$LOG_DST\" 2>&1 &); sleep 0.5; fi ;; "
                 + "esac; "
-                + "if ! pgrep -f '^(/.*/)?app_process.*ExtBridge' >/dev/null 2>&1; then "
+                + "if ! " + aliveExpr + "; then "
                 + "(CLASSPATH=/data/local/tmp/extbridge.jar nohup app_process /data/local/tmp com.extbridge.daemon.ExtBridge </dev/null >>\"$LOG_DST\" 2>&1 &); sleep 0.6; fi; "
-                + "if pgrep -f '^(/.*/)?app_process.*ExtBridge' >/dev/null 2>&1; then echo LAUNCH_DONE; else echo ERR_DAEMON_DIED; [ \"$LOG_DST\" != \"/dev/null\" ] && cat \"$LOG_DST\" 2>/dev/null; exit 24; fi";
+                + "if " + aliveExpr + "; then echo LAUNCH_DONE; else echo ERR_DAEMON_DIED; [ \"$LOG_DST\" != \"/dev/null\" ] && cat \"$LOG_DST\" 2>/dev/null; exit 24; fi";
     }
 
     public static String buildDaemonBootstrapScript(String stagedJarPath) {
@@ -850,21 +899,21 @@ public final class AdbBootstrap {
     }
 
     public static String buildDaemonBootstrapScript(String stagedJarPath, String expectedSha256) {
+        int myUserId = Math.max(0, android.os.Process.myUid() / 100000);
+        String tmpPath = "/data/local/tmp/extb_" + randomHex16() + ".jar";
         String extractLogic;
         if (stagedJarPath != null && !stagedJarPath.isEmpty()) {
             String qStage = stagedJarPath.replace("'", "");
-            extractLogic = "if [ -f '" + qStage + "' ] && [ ! -L '" + qStage + "' ] && [ -s '" + qStage + "' ]; then cp '" + qStage + "' \"$TMP_JAR\"; "
-                    + "else APK=$(pm path com.extbridge.helper | head -n1 | cut -d: -f2); "
-                    + "[ -n \"$APK\" ] && unzip -p \"$APK\" assets/extbridge.jar > \"$TMP_JAR\"; fi";
+            extractLogic = "if [ -f '" + qStage + "' ] && [ ! -L '" + qStage + "' ] && [ -s '" + qStage + "' ]; then cat '" + qStage + "' > '" + tmpPath + "'; "
+                    + "else " + buildMultiApkUnzipFallback(myUserId, "'" + tmpPath + "'") + "; fi";
         } else {
-            extractLogic = "APK=$(pm path com.extbridge.helper | head -n1 | cut -d: -f2); "
-                    + "[ -n \"$APK\" ] && unzip -p \"$APK\" assets/extbridge.jar > \"$TMP_JAR\"";
+            extractLogic = buildMultiApkUnzipFallback(myUserId, "'" + tmpPath + "'");
         }
         // Fail-closed BEFORE stopping any running daemon or touching /data/local/tmp/extbridge.jar
-        return "TMP_JAR=$(mktemp /data/local/tmp/extbridge.XXXXXX 2>/dev/null || echo /data/local/tmp/extbridge.jar.tmp.$$); "
-                + "if [ -L \"$TMP_JAR\" ]; then rm -f \"$TMP_JAR\"; echo ERR_TMP_SYMLINK; exit 21; fi; "
-                + "if ! ( " + extractLogic + " ); then rm -f \"$TMP_JAR\"; echo ERR_STAGE_JAR; exit 21; fi; "
-                + buildShellSwapAndLaunchScript("\"$TMP_JAR\"", expectedSha256);
+        return "if ! (umask 022; set -C; : > '" + tmpPath + "') 2>/dev/null || [ -L '" + tmpPath + "' ]; then "
+                + "rm -f '" + tmpPath + "' 2>/dev/null; echo ERR_TMP_SYMLINK; exit 21; fi; "
+                + extractLogic + "; "
+                + buildShellSwapAndLaunchScript("'" + tmpPath + "'", expectedSha256);
     }
 
     private static void awaitDaemonBinderReady(Context appCtx, boolean fromRoot, ProgressListener listener, String successMsg) {
@@ -935,6 +984,10 @@ public final class AdbBootstrap {
     }
 
     private static CmdRes runAdb(Context ctx, long timeoutMs, String... args) {
+        return runAdbWithStdinFile(ctx, timeoutMs, null, args);
+    }
+
+    private static CmdRes runAdbWithStdinFile(Context ctx, long timeoutMs, File stdinFile, String... args) {
         Process p = null;
         try {
             File adbBin = getAdbFile(ctx);
@@ -965,11 +1018,26 @@ public final class AdbBootstrap {
             pb.environment().putAll(env);
 
             p = pb.start();
-            try {
-                p.getOutputStream().close();
-            } catch (Throwable ignored) {}
             final StringBuilder sb = new StringBuilder();
             final Process proc = p;
+            if (stdinFile != null && stdinFile.isFile()) {
+                Thread writer = new Thread(() -> {
+                    try (InputStream fis = new FileInputStream(stdinFile);
+                         OutputStream pos = proc.getOutputStream()) {
+                        byte[] buf = new byte[8192];
+                        int n;
+                        while ((n = fis.read(buf)) > 0) {
+                            pos.write(buf, 0, n);
+                        }
+                        pos.flush();
+                    } catch (Throwable ignored) {}
+                }, "ExtAdbStdin");
+                writer.start();
+            } else {
+                try {
+                    p.getOutputStream().close();
+                } catch (Throwable ignored) {}
+            }
             Thread reader = new Thread(() -> {
                 try (BufferedReader br = new BufferedReader(new InputStreamReader(proc.getInputStream()))) {
                     String line;

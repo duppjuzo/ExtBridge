@@ -24,8 +24,8 @@ android {
         applicationId = "com.extbridge.helper"
         minSdk = 30
         targetSdk = 35
-        versionCode = 25
-        versionName = "3.5.3"
+        versionCode = 26
+        versionName = "3.5.4"
         ndk {
             abiFilters += "arm64-v8a"
         }
@@ -49,6 +49,10 @@ android {
 
     buildFeatures {
         compose = true
+    }
+
+    androidResources {
+        noCompress += "jar"
     }
 
     val expectedReleaseCertSha256 = "e4f67b3012a16633006c64bfc9d5a95c7bdda10826bd729777c2a3066f49117c"
