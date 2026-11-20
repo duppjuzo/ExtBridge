@@ -1,6 +1,6 @@
 # ExtBridge (`v3.5.4`) — Android 免 Root Type-C 类 DeX 扩展桌面与增强镜像副屏系统
 
-> **无需 Root · 单个 APK 自激活 · Xiaomi HyperOS 原生澎湃视觉 (`Compose + Miuix`) · 支持「DeX 独立扩展桌面」与「增强原生镜像信息副屏」双工作模式 · [📖 完整图文使用说明书](docs/USER_GUIDE.md) · [📝 v3.5.4 更新文档](docs/RELEASE_v3.5.4.md)**
+> **无需 Root · 单个 APK 自激活 · Xiaomi HyperOS 原生澎湃视觉 (`Compose + Miuix`) · 支持「DeX 独立扩展桌面」与「增强原生镜像信息副屏」双工作模式 · [📖 完整图文使用说明书](docs/USER_GUIDE.md) · [🚀 对比 v3.2 全量升级图文与激活详解](docs/UPGRADE_FROM_v3.2.md) · [📝 v3.5.4 更新文档](docs/RELEASE_v3.5.4.md)**
 
 许多 Android 手机与平板（如小米 / REDMI 在 HyperOS 下）连接 Type-C 显示器时，默认仅提供画面受限的**屏幕镜像（Mirroring）**，主屏与副屏比例割裂且两侧留下大片空白黑边。**ExtBridge** 通过 Shell 权限守护进程接管外接物理屏，不仅能够呈现类似 Samsung DeX 的**独立扩展桌面、自由分屏与一键主屏黑屏省电**，还能将传统镜像模式下多出的黑边改造为**支持主题换肤、系统桌面小组件、交互控制与外置鼠标自由跨屏的增强信息侧边栏**。
 
@@ -50,19 +50,23 @@
 
 ---
 
-## 📸 实机功能效果展示（更多细节见 [使用说明书](docs/USER_GUIDE.md)）
+## 📸 实机功能效果展示（更多细节见 [对比 v3.2 全量图文全览](docs/UPGRADE_FROM_v3.2.md) 与 [使用说明书](docs/USER_GUIDE.md)）
 
-| DeX 独立扩展桌面 & Dock | Win11 快捷浮窗 & 一键黑屏入口 | 主屏一键黑屏最低亮度保护 |
+| Miuix 主控台 · 澎湃深色 | Miuix 主控台 · 澎湃浅色 | 平板横屏 `NavigationRail` 双栏工作台 |
 | :---: | :---: | :---: |
-| ![ExtBridge 扩展桌面](docs/images/ext-desktop.png) | ![Dock 快捷浮窗](docs/images/ext-flyout.png) | ![主屏一键黑屏](docs/images/dex-blackout.png) |
+| ![主控台深色](docs/images/console-home-dark.png) | ![主控台浅色](docs/images/console-home-light.png) | ![平板双栏工作台](docs/images/console-rail-light.png) |
 
-| 短剧等应用强制横屏全屏 | DeX 50/50 自由分屏模式 | 手机/平板端增强虚拟触摸板 |
+| DeX 独立扩展桌面 & Dock | 澎湃控制中心快捷浮窗 | DeX 自由分屏与比例控制菜单 |
 | :---: | :---: | :---: |
-| ![强制横屏全屏](docs/images/ext-fullscreen.png) | ![自由分屏](docs/images/ext-split.png) | ![虚拟触摸板](docs/images/touchpad-portrait.png) |
+| ![ExtBridge 扩展桌面](docs/images/ext-desktop.png) | ![Dock 快捷浮窗](docs/images/ext-flyout.png) | ![自由分屏](docs/images/ext-split.png) |
 
-| 增强镜像 · 统一左侧信息栏 + 小组件 | 增强镜像 · 左右双翼侧边栏 | 无键鼠时主屏「副屏直控」小组件 |
+| 增强镜像 · 晨雾浅白 + 网易云小组件 | 增强镜像 · 赛博紫青主题换肤 | 增强大触摸板 & 软键盘跨屏转发 |
 | :---: | :---: | :---: |
-| ![镜像统一侧边栏](docs/images/mirror-unified.png) | ![镜像双翼侧边栏](docs/images/mirror-dual.png) | ![副屏直控](docs/images/side-control.png) |
+| ![镜像统一侧边栏](docs/images/mirror-unified.png) | ![镜像赛博紫青](docs/images/mirror-cyber.png) | ![虚拟触摸板](docs/images/touchpad-portrait.png) |
+
+| 增强镜像 · 左右双翼对称侧边栏 | 无键鼠主屏「副屏镜像直控」 | 主屏一键黑屏最低亮度保护 |
+| :---: | :---: | :---: |
+| ![镜像双翼侧边栏](docs/images/mirror-dual.png) | ![副屏直控](docs/images/side-control.png) | ![主屏一键黑屏](docs/images/dex-blackout.png) |
 
 ---
 

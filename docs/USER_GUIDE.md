@@ -103,9 +103,11 @@ ExtBridge `v3.5.3` 主控台会根据屏幕宽度自动适配布局：**横屏�
 
 ![主控台首页（平板双栏工作台 · DeX 在线）](images/console-main.png)
 
+![主控台首页（澎湃浅色模式）](images/console-home-light.png)
+
 ![连接与渲染管线诊断抽屉](images/console-diag.png)
 
-![显示与边栏 · DeX 扩展画布与 DPI 配置页](images/console-main.png)
+![显示与边栏 · DeX 扩展画布与 DPI 配置页](images/console-dex-config.png)
 
 ![显示与边栏 · 原生镜像 2×2 可视化布局与小组件槽位](images/console-mirror.png)
 
