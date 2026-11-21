@@ -95,7 +95,12 @@ try {
 }
 
 $EXPECTED_CERT_SHA256 = "e4f67b3012a16633006c64bfc9d5a95c7bdda10826bd729777c2a3066f49117c"
-$requireReleaseKey = ($env:EXTBRIDGE_REQUIRE_RELEASE_KEY -eq "1") -or ($env:GITHUB_REF -like "refs/tags/v*")
+$OFFICIAL_REPO = "duppjuzo/ExtBridge"
+$isOfficialCiRepo = (-not $env:GITHUB_REPOSITORY) -or ($env:GITHUB_REPOSITORY -ieq $OFFICIAL_REPO)
+if ($env:GITHUB_REPOSITORY -and (-not $isOfficialCiRepo)) {
+    Write-Warning "Unofficial fork repository detected ($($env:GITHUB_REPOSITORY) != $OFFICIAL_REPO). Official release publishing is disabled."
+}
+$requireReleaseKey = ($env:EXTBRIDGE_REQUIRE_RELEASE_KEY -eq "1") -or ($isOfficialCiRepo -and ($env:GITHUB_REF -like "refs/tags/v*"))
 Remove-Item -Force "$BUILD\out\exthelper.apk", "$BUILD\out\exthelper-unsigned.apk" -ErrorAction SilentlyContinue
 
 $signedApk = Get-ChildItem -Path "$ROOT\helper\build\outputs\apk\release" -Filter "*-release.apk" -ErrorAction SilentlyContinue | Select-Object -First 1

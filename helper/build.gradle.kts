@@ -24,8 +24,8 @@ android {
         applicationId = "com.extbridge.helper"
         minSdk = 30
         targetSdk = 35
-        versionCode = 26
-        versionName = "3.5.4"
+        versionCode = 27
+        versionName = "3.5.5beta"
         ndk {
             abiFilters += "arm64-v8a"
         }
@@ -74,9 +74,10 @@ android {
         throw GradleException("EXTBRIDGE_KEYSTORE_PASS (or EXTBRIDGE) must be explicitly set when EXTBRIDGE_KEYSTORE is provided.")
     }
     val activePass = envPass ?: "extbridge"
+    val isOfficialCiRepo = System.getenv("GITHUB_REPOSITORY")?.let { it.equals("duppjuzo/ExtBridge", ignoreCase = true) } ?: true
     val requireReleaseKey = (System.getenv("EXTBRIDGE_REQUIRE_RELEASE_KEY") == "1")
         || (project.findProperty("requireReleaseKey")?.toString()?.equals("true", ignoreCase = true) == true)
-        || (System.getenv("GITHUB_REF")?.startsWith("refs/tags/v") == true)
+        || (isOfficialCiRepo && System.getenv("GITHUB_REF")?.startsWith("refs/tags/v") == true)
     val allowUnsignedRelease = !requireReleaseKey && (
         (System.getenv("EXTBRIDGE_ALLOW_UNSIGNED_RELEASE") == "1")
             || (project.findProperty("allowUnsignedRelease")?.toString()?.equals("true", ignoreCase = true) == true)
@@ -193,6 +194,9 @@ dependencies {
     implementation("top.yukonga.miuix.kmp:miuix-preference:0.9.4")
     implementation("top.yukonga.miuix.kmp:miuix-icons:0.9.4")
     implementation("top.yukonga.miuix.kmp:miuix-squircle:0.9.4")
+    implementation("dev.rikka.shizuku:aidl:13.1.5")
+    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:provider:13.1.5")
 }
 
 tasks.named("preBuild") {

@@ -1,6 +1,6 @@
-# ExtBridge (`v3.5.4`) — Android 免 Root Type-C 类 DeX 扩展桌面与增强镜像副屏系统
+# ExtBridge (`v3.5.5beta`) — Android 免 Root Type-C 类 DeX 扩展桌面与增强镜像副屏系统
 
-> **无需 Root · 单个 APK 自激活 · Xiaomi HyperOS 原生澎湃视觉 (`Compose + Miuix`) · 支持「DeX 独立扩展桌面」与「增强原生镜像信息副屏」双工作模式 · [📖 完整图文使用说明书](docs/USER_GUIDE.md) · [🚀 对比 v3.2 全量升级图文与激活详解](docs/UPGRADE_FROM_v3.2.md) · [📝 v3.5.4 更新文档](docs/RELEASE_v3.5.4.md)**
+> **无需 Root · 单 APK 四模自激活（无线调试 / Shizuku / Root / 电脑 ADB）· Xiaomi HyperOS 原生澎湃视觉 (`Compose + Miuix`) · 支持「DeX 独立扩展桌面」与「增强原生镜像信息副屏」双工作模式 · [📖 完整图文使用说明书](docs/USER_GUIDE.md) · [🚀 对比 v3.2 全量升级图文与激活详解](docs/UPGRADE_FROM_v3.2.md) · [📝 更新日志](CHANGELOG.md)**
 
 许多 Android 手机与平板（如小米 / REDMI 在 HyperOS 下）连接 Type-C 显示器时，默认仅提供画面受限的**屏幕镜像（Mirroring）**，主屏与副屏比例割裂且两侧留下大片空白黑边。**ExtBridge** 通过 Shell 权限守护进程接管外接物理屏，不仅能够呈现类似 Samsung DeX 的**独立扩展桌面、自由分屏与一键主屏黑屏省电**，还能将传统镜像模式下多出的黑边改造为**支持主题换肤、系统桌面小组件、交互控制与外置鼠标自由跨屏的增强信息侧边栏**。
 
@@ -44,9 +44,9 @@
 - **横屏自动左右分屏 / 竖屏自动上下分屏**：Dock 一键分屏或桌面图标长按/右键放入左/右/上/下屏；中央高对比度拖拽分割条支持 **`25% ~ 75%`** 实时调节比例与快捷预设（`3:7 / 4:6 / 5:5 / 6:4 / 7:3`、`⇄/⇅ 互换`、`✕ 退出`）。
 - **三档分应用兼容策略 + 防悬浮小窗劫持**：支持 *跟随系统默认 / 强制横屏全屏 / 竖屏居中兼容*（配置持久化于 `/data/local/tmp/extbridge_apps.conf`），同时针对开启了小米「工作台模式（无界桌面）」或系统「强制桌面模式」的设备自动锁定扩展屏 `WINDOWING_MODE_FULLSCREEN` 容器，防止桌面与应用被系统误塞进鼠标无法拖拽的 `•••` 悬浮小窗。
 
-### 4. 📱 虚拟触摸板与键盘输入转发 + 单 APK 三模自激活
+### 4. 📱 虚拟触摸板与键盘输入转发 + 单 APK 四模自激活
 - **增强虚拟触摸板 (`TouchpadActivity`)**：支持单指移动、轻触左键、双指右键、双指/右边缘滚动、拖拽锁定开关、`0.6x ~ 2.4x` 指针灵敏度调节、一键直达「副屏直控」，以及呼出主屏软键盘将输入文字/回车/退格转发给外接屏焦点应用。
-- **单 APK 三模自激活**：APK 内置 `arm64-v8a` 原生 `adb` (`libadb.so`) 与 `extbridge.jar`，支持 **免 Root 本机无线调试通知栏填码激活**、**电脑 ADB 一键激活** 与 **已 Root 设备静默降权激活 (`uid=2000 shell`)**。
+- **单 APK 四模自激活**：APK 内置 `arm64-v8a` 原生 `adb` (`libadb.so`) 与 `extbridge.jar`，同时支持 **免 Root 本机无线调试通知栏填码激活**、**Shizuku / Sui 免配对码一键秒激活**、**电脑 ADB 一键激活** 与 **已 Root 设备静默降权激活 (`uid=2000 shell`)**。
 
 ---
 
@@ -97,6 +97,7 @@
 │       ├── ControlReceiver.java             # `goAsync()` 异步后台广播控制接收器（含发送方 UID 鉴权）
 │       ├── NavAssistService.java            # 无障碍辅助服务（高优先级黑屏遮罩、边缘叠加、手势穿透）
 │       ├── AdbBootstrap.java                # mDNS 自动发现、无线调试配对连接、守护进程拉起
+│       ├── ShizukuBootstrap.java            # Shizuku / Sui 授权探测与远程 Shell 一键拉起
 │       └── AdbPairingReceiver.java          # 通知栏 6 位配对码快捷响应
 ├── docs/
 │   ├── USER_GUIDE.md                        # 完整图文使用说明书
@@ -116,9 +117,10 @@
 详细图文步骤与各模式操作说明请阅读 **[📖 docs/USER_GUIDE.md](docs/USER_GUIDE.md)**。
 
 ### 核心 3 步：
-1. 安装 `ExtBridge_v3.5.4.apk`，首次打开按提示授予 **通知**、**悬浮窗** 与 **无障碍服务 (`ExtBridge 平板辅助手势`)** 权限（小米等设备建议在开发者选项开启「USB 调试（安全设置）」以允许点击注入）。
+1. 安装 `ExtBridge_v3.5.5beta.apk`，首次打开按提示授予 **通知**、**悬浮窗** 与 **无障碍服务 (`ExtBridge 平板辅助手势`)** 权限（小米等设备建议在开发者选项开启「USB 调试（安全设置）」以允许点击注入）。
 2. 在激活弹窗中任选其一启动守护进程：
    - **免 Root 本机无线调试**：打开系统无线调试后在通知栏直接填 6 位配对码自激活；
+   - **Shizuku 一键激活**：若本机已运行 Shizuku / Sui，点击授权即可免配对码秒级拉起并支持启动时自动恢复；
    - **电脑 ADB 一键命令**（零宿主变量展开，兼容 Windows CMD / PowerShell 与 Linux / macOS Bash / Zsh）：
      ```bash
      adb shell "rm -f /data/local/tmp/extb_src.apk /data/local/tmp/extbridge.jar.new && pm path com.extbridge.helper | grep '^package:' | cut -d: -f2 | head -n1 | xargs cat > /data/local/tmp/extb_src.apk && test -s /data/local/tmp/extb_src.apk && unzip -p /data/local/tmp/extb_src.apk assets/extbridge.jar > /data/local/tmp/extbridge.jar.new && rm -f /data/local/tmp/extb_src.apk && test -s /data/local/tmp/extbridge.jar.new && chmod 644 /data/local/tmp/extbridge.jar.new && timeout 6 env CLASSPATH=/data/local/tmp/extbridge.jar.new app_process /data/local/tmp com.extbridge.daemon.ExtBridge --verify-helper >/dev/null 2>&1 && (timeout 8 env CLASSPATH=/data/local/tmp/extbridge.jar.new app_process /data/local/tmp com.extbridge.daemon.ExtBridge --stop >/dev/null 2>&1 || true) && ((pgrep -f '^app_process.*ExtBridge' >/dev/null 2>&1 || pgrep -f '^/system/bin/app_process.*ExtBridge' >/dev/null 2>&1) && (pkill -f '^app_process.*ExtBridge' 2>/dev/null; pkill -f '^/system/bin/app_process.*ExtBridge' 2>/dev/null; true) && sleep 1 && (pkill -f -l KILL '^app_process.*ExtBridge' 2>/dev/null; pkill -f -l KILL '^/system/bin/app_process.*ExtBridge' 2>/dev/null; true) || true) && rm -f /data/local/tmp/extbridge.jar && mv -f /data/local/tmp/extbridge.jar.new /data/local/tmp/extbridge.jar && test -s /data/local/tmp/extbridge.jar && (appops set com.extbridge.helper SYSTEM_ALERT_WINDOW allow 2>/dev/null || true) && (appops set com.extbridge.helper RUN_ANY_IN_BACKGROUND allow 2>/dev/null || true) && (appops set com.extbridge.helper 10021 allow 2>/dev/null || true) && (appops set com.extbridge.helper ACCESS_RESTRICTED_SETTINGS allow 2>/dev/null || true) && (pm grant com.extbridge.helper android.permission.POST_NOTIFICATIONS 2>/dev/null || true) && (dumpsys deviceidle whitelist +com.extbridge.helper >/dev/null 2>&1 || true) && (CLASSPATH=/data/local/tmp/extbridge.jar nohup app_process /data/local/tmp com.extbridge.daemon.ExtBridge >/data/local/tmp/extbridge.log 2>&1 </dev/null &)"

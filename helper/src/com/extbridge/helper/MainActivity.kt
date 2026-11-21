@@ -219,12 +219,14 @@ class MainActivity : ComponentActivity() {
     private var startupPermInProgress = false
     private var waitingSettingsReturn = false
     private var userSkippedActivation = false
+    private var autoShizukuTried = false
     private var autoRootTried = false
+    private var pendingShizukuAutoRun = false
 
     // Overlay Sheets & Dialogs visibility
     private var showDiagSheet by mutableStateOf(false)
     private var showActivationSheet by mutableStateOf(false)
-    private var activationInitTab by mutableIntStateOf(1)
+    private var activationInitTab by mutableIntStateOf(0)
     private var showPermDialog by mutableStateOf(false)
     private var permDialogIsDevGate by mutableStateOf(false)
     private var showDevGuideDialog by mutableStateOf(false)
@@ -237,6 +239,12 @@ class MainActivity : ComponentActivity() {
     private var activeWidgetSlot by mutableIntStateOf(0)
 
     // Activation sheet live state
+    private var autoShizukuEnabled by mutableStateOf(false)
+    private var shizukuAlive by mutableStateOf(false)
+    private var shizukuGranted by mutableStateOf(false)
+    private var shizukuInstalled by mutableStateOf(false)
+    private var shizukuRationale by mutableStateOf(false)
+    private var shizukuSummary by mutableStateOf("")
     private var autoRootEnabled by mutableStateOf(false)
     private var autoCloseWifiAdbEnabled by mutableStateOf(false)
     private var hasSuHint by mutableStateOf(false)
@@ -279,25 +287,41 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private val autoPromptCheck = Runnable {
-        if (isFinishing || startupPermInProgress || showPermDialog) return@Runnable
-        if (BridgeClient.getService() != null) return@Runnable
-        if (!autoRootTried && AdbBootstrap.isAutoRootEnabled(this)) {
-            autoRootTried = true
-            Toast.makeText(this, "正在尝试自动 Root 激活 ExtBridge 服务…", Toast.LENGTH_SHORT).show()
-            AdbBootstrap.rootBootstrapAsync(this, false, object : AdbBootstrap.ProgressListener {
-                override fun onStep(message: String?) {}
-                override fun onResult(success: Boolean, message: String?) {
-                    refreshAllState(syncFromDaemon = true)
-                    if (!success && !isFinishing && !userSkippedActivation && !showActivationSheet) {
-                        openActivationSheet()
+    private val autoPromptCheck: Runnable = object : Runnable {
+        override fun run() {
+            if (isFinishing || startupPermInProgress || showPermDialog) return
+            if (BridgeClient.getService() != null) return
+            if (!autoShizukuTried && AdbBootstrap.isAutoShizukuEnabled(this@MainActivity) && ShizukuBootstrap.isReadyAndGranted()) {
+                autoShizukuTried = true
+                Toast.makeText(this@MainActivity, "正在通过 Shizuku 自动激活 ExtBridge 服务…", Toast.LENGTH_SHORT).show()
+                AdbBootstrap.shizukuBootstrapAsync(this@MainActivity, false, object : AdbBootstrap.ProgressListener {
+                    override fun onStep(message: String?) {}
+                    override fun onResult(success: Boolean, message: String?) {
+                        refreshAllState(syncFromDaemon = true)
+                        if (!success && !isFinishing && !userSkippedActivation && !showActivationSheet) {
+                            handler.post(autoPromptCheck)
+                        }
                     }
-                }
-            })
-            return@Runnable
-        }
-        if (!userSkippedActivation && !showActivationSheet) {
-            openActivationSheet()
+                })
+                return
+            }
+            if (!autoRootTried && AdbBootstrap.isAutoRootEnabled(this@MainActivity)) {
+                autoRootTried = true
+                Toast.makeText(this@MainActivity, "正在尝试自动 Root 激活 ExtBridge 服务…", Toast.LENGTH_SHORT).show()
+                AdbBootstrap.rootBootstrapAsync(this@MainActivity, false, object : AdbBootstrap.ProgressListener {
+                    override fun onStep(message: String?) {}
+                    override fun onResult(success: Boolean, message: String?) {
+                        refreshAllState(syncFromDaemon = true)
+                        if (!success && !isFinishing && !userSkippedActivation && !showActivationSheet) {
+                            openActivationSheet()
+                        }
+                    }
+                })
+                return
+            }
+            if (!userSkippedActivation && !showActivationSheet) {
+                openActivationSheet()
+            }
         }
     }
 
@@ -310,6 +334,7 @@ class MainActivity : ComponentActivity() {
         BridgeService.sUserStopping = false
         BridgeService.ensureStarted(this)
 
+        bindShizukuCallbacks()
         syncLocalPrefsToState()
         refreshAllState(syncFromDaemon = true)
 
@@ -319,8 +344,8 @@ class MainActivity : ComponentActivity() {
         }
 
         val verName = runCatching {
-            packageManager.getPackageInfo(packageName, 0).versionName ?: "3.5.4"
-        }.getOrDefault("3.5.4")
+            packageManager.getPackageInfo(packageName, 0).versionName ?: "3.5.5beta"
+        }.getOrDefault("3.5.5beta")
 
         setContent {
             ExtHyperTheme(themeModeIndex = themeModeIdx) {
@@ -338,6 +363,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        bindShizukuCallbacks()
         BridgeClient.setOnBinderReady(binderReadyCb)
         if (BridgeClient.getService() == null) BridgeClient.requestBinder(this)
         BridgeService.sUserStopping = false
@@ -377,9 +403,50 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        ShizukuBootstrap.unbindUiCallbacks()
         AdbBootstrap.stopDiscoveryIfIdle()
         handler.removeCallbacksAndMessages(null)
         super.onDestroy()
+    }
+
+    private fun bindShizukuCallbacks() {
+        ShizukuBootstrap.bindUiCallbacks(
+            {
+                if (!isFinishing && !isDestroyed) {
+                    refreshShizukuUiState()
+                    if (!startupPermInProgress && !autoShizukuTried &&
+                        BridgeClient.getService() == null &&
+                        AdbBootstrap.isAutoShizukuEnabled(this) &&
+                        ShizukuBootstrap.isReadyAndGranted()
+                    ) {
+                        handler.removeCallbacks(autoPromptCheck)
+                        handler.post(autoPromptCheck)
+                    }
+                }
+            },
+            { granted ->
+                if (!isFinishing && !isDestroyed) {
+                    refreshShizukuUiState()
+                    val shouldRun = pendingShizukuAutoRun
+                    pendingShizukuAutoRun = false
+                    if (granted && shouldRun) {
+                        triggerShizukuActivation()
+                    } else if (!granted) {
+                        actWorking = false
+                        actStatusColor = HyperRed
+                        actStatusText = "未获得 Shizuku 授权；若曾勾选不再询问，请打开 Shizuku 手动勾选 ExtBridge。"
+                    }
+                }
+            },
+        )
+    }
+
+    private fun refreshShizukuUiState() {
+        shizukuInstalled = ShizukuBootstrap.isShizukuInstalled(this)
+        shizukuAlive = ShizukuBootstrap.isBinderAlive()
+        shizukuGranted = ShizukuBootstrap.isPermissionGranted()
+        shizukuRationale = ShizukuBootstrap.shouldShowRationale()
+        shizukuSummary = ShizukuBootstrap.buildStateSummary(this)
     }
 
     private fun ensureOnDisplay0(): Boolean {
@@ -402,9 +469,11 @@ class MainActivity : ComponentActivity() {
 
     private fun syncLocalPrefsToState() {
         dockAutoHide = BridgeService.isDockAutoHideEnabled(this)
+        autoShizukuEnabled = AdbBootstrap.isAutoShizukuEnabled(this)
         autoRootEnabled = AdbBootstrap.isAutoRootEnabled(this)
         autoCloseWifiAdbEnabled = AdbBootstrap.isAutoCloseWifiAdbEnabled(this)
         hasSuHint = AdbBootstrap.hasSuBinaryHint()
+        refreshShizukuUiState()
         mirrorThemeId = BridgeService.getMirrorThemeId(this)
         mirrorSpeedIdx = BridgeService.getMirrorCursorSpeedIdx(this)
         mirrorMemoPreview = BridgeService.getMirrorMemoText(this)
@@ -764,7 +833,7 @@ class MainActivity : ComponentActivity() {
                 "未激活",
                 HyperRed,
                 "守护进程尚未运行",
-                "支持 Root 一键拉起、本机无线调试自激活或电脑单行 ADB 命令启动。",
+                "支持本机无线调试、Shizuku 一键激活、Root 降权拉起或电脑单行 ADB 命令启动。",
             )
             st.mirrorMode == 1 && st.extId > 0 -> QuadHero(
                 "镜像投屏",
@@ -1472,10 +1541,20 @@ class MainActivity : ComponentActivity() {
             Card {
                 ArrowPreference(
                     title = "激活 / 重连核心守护进程",
-                    summary = if (daemonStatus.connected) "当前在线 · 点击查看 Root / 无线调试 / ADB 引导" else "当前未连接 · 点击立即激活",
+                    summary = if (daemonStatus.connected) "当前在线 · 点击查看无线调试 / Shizuku / Root / ADB 引导" else "当前未连接 · 点击立即激活",
                     onClick = {
                         userSkippedActivation = false
                         openActivationSheet()
+                    },
+                )
+                SectionLine()
+                SwitchPreference(
+                    title = "启动时自动尝试 Shizuku 激活",
+                    summary = "检测到已授权的 Shizuku 服务时静默拉起守护进程",
+                    checked = autoShizukuEnabled,
+                    onCheckedChange = { next ->
+                        autoShizukuEnabled = next
+                        AdbBootstrap.setAutoShizukuEnabled(this@MainActivity, next)
                     },
                 )
                 SectionLine()
@@ -1568,6 +1647,16 @@ class MainActivity : ComponentActivity() {
                 autoRootEnabled = next
                 AdbBootstrap.setAutoRootEnabled(this, next)
             },
+            shizukuAlive = shizukuAlive,
+            shizukuGranted = shizukuGranted,
+            shizukuInstalled = shizukuInstalled,
+            shizukuRationale = shizukuRationale,
+            shizukuSummary = shizukuSummary,
+            autoShizukuEnabled = autoShizukuEnabled,
+            onAutoShizukuChange = { next ->
+                autoShizukuEnabled = next
+                AdbBootstrap.setAutoShizukuEnabled(this, next)
+            },
             mdnsHint = mdnsHint,
             pairHost = pairHost,
             onPairHostChange = {
@@ -1591,6 +1680,13 @@ class MainActivity : ComponentActivity() {
             working = actWorking,
             pcAdbCommand = remember { AdbBootstrap.buildPcAdbCommand() },
             onSelectWirelessTab = { startMdnsDiscovery() },
+            onRefreshShizuku = { refreshShizukuUiState() },
+            onRunOrAuthShizuku = { triggerShizukuAuthOrRun() },
+            onOpenShizukuApp = {
+                if (!ShizukuBootstrap.openShizukuAppOrWebsite(this)) {
+                    Toast.makeText(this, "已打开 Shizuku 官方网站说明页", Toast.LENGTH_SHORT).show()
+                }
+            },
             onRunRoot = { triggerRootActivation() },
             onOpenDevOptions = { openDeveloperOptionsWithGate() },
             onSendPairNotif = {
@@ -1886,13 +1982,72 @@ class MainActivity : ComponentActivity() {
         connPortEdited = false
         pairHost = AdbBootstrap.getLocalIpv4()
         hasSuHint = AdbBootstrap.hasSuBinaryHint()
+        autoShizukuEnabled = AdbBootstrap.isAutoShizukuEnabled(this)
         autoRootEnabled = AdbBootstrap.isAutoRootEnabled(this)
-        activationInitTab = if (hasSuHint || autoRootEnabled) 0 else 1
+        refreshShizukuUiState()
+        activationInitTab = when {
+            shizukuAlive || autoShizukuEnabled -> 1
+            hasSuHint || autoRootEnabled -> 2
+            shizukuInstalled -> 1
+            else -> 0
+        }
         actStatusText = ""
         showActivationSheet = true
-        if (activationInitTab == 1) {
+        if (activationInitTab == 0) {
             startMdnsDiscovery()
         }
+    }
+
+    private fun triggerShizukuAuthOrRun() {
+        if (actWorking) return
+        refreshShizukuUiState()
+        if (!shizukuAlive) {
+            actStatusColor = HyperRed
+            actStatusText = "未检测到运行中的 Shizuku 服务，请先启动 Shizuku。"
+            return
+        }
+        if (ShizukuBootstrap.isPreV11()) {
+            actStatusColor = HyperRed
+            actStatusText = "当前 Shizuku 版本过低（需 v11 及以上）。"
+            return
+        }
+        if (shizukuGranted) {
+            triggerShizukuActivation()
+        } else {
+            pendingShizukuAutoRun = true
+            actStatusColor = HyperBlue
+            actStatusText = "请在弹出的 Shizuku 窗口中点击「允许」…"
+            if (!ShizukuBootstrap.requestPermissionIfPossible()) {
+                pendingShizukuAutoRun = false
+                refreshShizukuUiState()
+                actStatusColor = HyperRed
+                actStatusText = "无法弹出授权请求，请点击「打开 Shizuku」手动开启 ExtBridge 开关。"
+            }
+        }
+    }
+
+    private fun triggerShizukuActivation() {
+        if (actWorking) return
+        actWorking = true
+        actStatusColor = HyperBlue
+        actStatusText = "正在通过 Shizuku 释放并启动 ExtBridge 守护进程…"
+        AdbBootstrap.shizukuBootstrapAsync(this, true, object : AdbBootstrap.ProgressListener {
+            override fun onStep(message: String?) {
+                actStatusColor = HyperBlue
+                actStatusText = message ?: ""
+            }
+
+            override fun onResult(success: Boolean, message: String?) {
+                actWorking = false
+                actStatusColor = if (success) HyperGreen else HyperRed
+                actStatusText = message ?: ""
+                if (success) {
+                    autoShizukuEnabled = true
+                }
+                refreshShizukuUiState()
+                refreshAllState(syncFromDaemon = true)
+            }
+        })
     }
 
     private fun startMdnsDiscovery() {

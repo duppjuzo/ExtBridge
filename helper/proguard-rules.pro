@@ -1,6 +1,12 @@
 -keep class com.extbridge.** { *; }
 -keep interface com.extbridge.** { *; }
+-keep class rikka.shizuku.** { *; }
+-keep interface rikka.shizuku.** { *; }
+-keep class moe.shizuku.** { *; }
+-keep interface moe.shizuku.** { *; }
 -keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod
 -dontwarn com.extbridge.**
+-dontwarn rikka.shizuku.**
+-dontwarn moe.shizuku.**
 -dontwarn android.**
 -dontwarn dalvik.**

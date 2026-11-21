@@ -17,6 +17,7 @@ import android.os.Looper;
 import android.util.Log;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -54,6 +55,7 @@ public final class AdbBootstrap {
     private static final String SERVICE_CONNECT = "_adb-tls-connect._tcp.";
     private static final String PREFS_NAME = "extbridge_prefs";
     private static final String KEY_AUTO_ROOT = "auto_root_enabled";
+    private static final String KEY_AUTO_SHIZUKU = "auto_shizuku_enabled";
     private static final String KEY_AUTO_CLOSE_WIFI_ADB = "auto_close_wifi_adb";
     private static String sActivePairSvcName = "";
     private static String sActiveConnSvcName = "";
@@ -663,7 +665,7 @@ public final class AdbBootstrap {
             try { runAdb(appCtx, 2500, "-s", target, "shell", "settings put global adb_wifi_enabled 0"); } catch (Throwable ignored) {}
         }
 
-        awaitDaemonBinderReady(appCtx, false, listener, "无线调试激活成功，ExtBridge 服务已就绪！");
+        awaitDaemonBinderReady(appCtx, 0, listener, "无线调试激活成功，ExtBridge 服务已就绪！");
     }
 
     public static boolean isAutoCloseWifiAdbEnabled(Context ctx) {
@@ -688,6 +690,18 @@ public final class AdbBootstrap {
         if (ctx == null) return;
         SharedPreferences sp = ctx.getApplicationContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
         sp.edit().putBoolean(KEY_AUTO_ROOT, enabled).apply();
+    }
+
+    public static boolean isAutoShizukuEnabled(Context ctx) {
+        if (ctx == null) return false;
+        SharedPreferences sp = ctx.getApplicationContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        return sp.getBoolean(KEY_AUTO_SHIZUKU, false);
+    }
+
+    public static void setAutoShizukuEnabled(Context ctx, boolean enabled) {
+        if (ctx == null) return;
+        SharedPreferences sp = ctx.getApplicationContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        sp.edit().putBoolean(KEY_AUTO_SHIZUKU, enabled).apply();
     }
 
     public static boolean hasSuBinaryHint() {
@@ -808,7 +822,99 @@ public final class AdbBootstrap {
             if (markAutoRoot) {
                 setAutoRootEnabled(appCtx, true);
             }
-            awaitDaemonBinderReady(appCtx, true, listener, "Root 一键激活成功，ExtBridge 服务已就绪！");
+            awaitDaemonBinderReady(appCtx, 1, listener, "Root 一键激活成功，ExtBridge 服务已就绪！");
+        });
+    }
+
+    public static void shizukuBootstrapAsync(final Context ctx, final boolean markAutoShizuku, final ProgressListener listener) {
+        final Context appCtx = ctx.getApplicationContext();
+        sExec.execute(() -> {
+            if (!ShizukuBootstrap.isBinderAlive()) {
+                postResult(listener, false, "未检测到运行中的 Shizuku 服务，请先启动 Shizuku（或使用内置无线调试激活）。");
+                return;
+            }
+            if (ShizukuBootstrap.isPreV11()) {
+                postResult(listener, false, "当前 Shizuku 版本过低（需 v11 及以上）。");
+                return;
+            }
+            if (!ShizukuBootstrap.isPermissionGranted()) {
+                postResult(listener, false, "尚未授予 ExtBridge 使用 Shizuku 的权限，请先点击授权按钮。");
+                return;
+            }
+
+            postStep(listener, "正在通过 Shizuku 释放 extbridge.jar 并拉起守护进程...");
+            byte[] jarBytes = null;
+            String expSha = "";
+            try (InputStream in = appCtx.getAssets().open("extbridge.jar");
+                 ByteArrayOutputStream bos = new ByteArrayOutputStream(96 * 1024)) {
+                MessageDigest md = MessageDigest.getInstance("SHA-256");
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) > 0) {
+                    md.update(buf, 0, n);
+                    bos.write(buf, 0, n);
+                }
+                jarBytes = bos.toByteArray();
+                byte[] dig = md.digest();
+                StringBuilder hex = new StringBuilder(64);
+                for (byte b : dig) {
+                    hex.append(String.format(Locale.US, "%02x", b & 0xff));
+                }
+                expSha = hex.toString();
+            } catch (Throwable t) {
+                Log.w(TAG, "Failed to read assets/extbridge.jar for Shizuku", t);
+            }
+            if (jarBytes == null || jarBytes.length < 4096 || expSha.isEmpty()) {
+                postResult(listener, false, "无法读取 APK 内置 assets/extbridge.jar");
+                return;
+            }
+
+            int myUserId = Math.max(0, android.os.Process.myUid() / 100000);
+            String tmpJar = "/data/local/tmp/extb_" + randomHex16() + ".jar";
+            String stageCmd = "rm -f '" + tmpJar + "' 2>/dev/null; "
+                    + "if ! (umask 022; set -C; cat > '" + tmpJar + "') 2>/dev/null || [ -L '" + tmpJar + "' ] || [ ! -s '" + tmpJar + "' ]; then "
+                    + "rm -f '" + tmpJar + "' 2>/dev/null; echo ERR_SHIZUKU_STDIN; exit 21; fi; "
+                    + "chmod 644 '" + tmpJar + "' 2>/dev/null; "
+                    + "chown -h 2000:2000 '" + tmpJar + "' 2>/dev/null || true; "
+                    + "echo STAGE_OK";
+            ShizukuBootstrap.ShellResult stageRes = ShizukuBootstrap.execShell(15000, jarBytes, stageCmd);
+            boolean stdinStaged = (stageRes.code == 0 && stageRes.output.contains("STAGE_OK"));
+
+            String fallbackExtract = buildMultiApkUnzipFallback(myUserId, "'" + tmpJar + "'");
+            String ensureStaged = stdinStaged
+                    ? ("if [ ! -f '" + tmpJar + "' ] || [ -L '" + tmpJar + "' ] || [ ! -s '" + tmpJar + "' ]; then "
+                            + "rm -f '" + tmpJar + "' 2>/dev/null; " + fallbackExtract + "; fi; ")
+                    : ("rm -f '" + tmpJar + "' 2>/dev/null; " + fallbackExtract + "; ");
+
+            String shellInner = buildShellSwapAndLaunchScript("'" + tmpJar + "'", expSha);
+            String qShellInner = shellInner.replace("'", "'\\''");
+            String launchCmd = ensureStaged
+                    + "UID_NOW=$(id -u 2>/dev/null || echo 2000); "
+                    + "if [ \"$UID_NOW\" = \"0\" ]; then "
+                    + "chmod 644 '" + tmpJar + "' 2>/dev/null; chown -h 2000:2000 '" + tmpJar + "' 2>/dev/null || true; "
+                    + "run_as_shell() { "
+                    + "su 2000 -c \"$1\" && return 0; rc=$?; [ \"$rc\" -ge 20 ] && [ \"$rc\" -le 29 ] && return \"$rc\"; "
+                    + "su shell -c \"$1\" 2>/dev/null && return 0; rc=$?; [ \"$rc\" -ge 20 ] && [ \"$rc\" -le 29 ] && return \"$rc\"; "
+                    + "su 2000 /system/bin/sh -c \"$1\" 2>/dev/null && return 0; rc=$?; [ \"$rc\" -ge 20 ] && [ \"$rc\" -le 29 ] && return \"$rc\"; "
+                    + "/system/bin/sh -c \"$1\"; "
+                    + "}; "
+                    + "run_as_shell '" + qShellInner + "'; RC=$?; "
+                    + "else "
+                    + "/system/bin/sh -c '" + qShellInner + "'; RC=$?; "
+                    + "fi; "
+                    + "rm -f '" + tmpJar + "' 2>/dev/null; exit $RC";
+
+            ShizukuBootstrap.ShellResult res = ShizukuBootstrap.execShell(25000, null, launchCmd);
+            if (res.code != 0 || !res.output.contains("LAUNCH_DONE")) {
+                ShizukuBootstrap.execShell(2000, null, "rm -f '" + tmpJar + "' 2>/dev/null");
+                postResult(listener, false, "Shizuku 启动守护进程失败:\n" + res.output);
+                return;
+            }
+
+            if (markAutoShizuku) {
+                setAutoShizukuEnabled(appCtx, true);
+            }
+            awaitDaemonBinderReady(appCtx, 2, listener, "Shizuku 一键激活成功，ExtBridge 服务已就绪！");
         });
     }
 
@@ -916,7 +1022,7 @@ public final class AdbBootstrap {
                 + buildShellSwapAndLaunchScript("'" + tmpPath + "'", expectedSha256);
     }
 
-    private static void awaitDaemonBinderReady(Context appCtx, boolean fromRoot, ProgressListener listener, String successMsg) {
+    private static void awaitDaemonBinderReady(Context appCtx, int diagSource, ProgressListener listener, String successMsg) {
         postStep(listener, "守护进程已拉起，正在验证 Binder 连接...");
         long deadline = System.currentTimeMillis() + 12000;
         while (System.currentTimeMillis() < deadline) {
@@ -929,10 +1035,15 @@ public final class AdbBootstrap {
             try { Thread.sleep(250); } catch (InterruptedException ignored) { break; }
         }
         String tailDiag = "";
-        if (fromRoot) {
+        if (diagSource == 1) {
             CmdRes diag = runSu(3000, "tail -n 8 /data/local/tmp/extbridge.log 2>/dev/null");
             if (diag.output != null && !diag.output.trim().isEmpty()) {
                 tailDiag = "\n日志摘要:\n" + diag.output.trim();
+            }
+        } else if (diagSource == 2) {
+            ShizukuBootstrap.ShellResult diag = ShizukuBootstrap.execShell(3000, null, "tail -n 8 /data/local/tmp/extbridge.log 2>/dev/null");
+            if (!diag.output.isEmpty()) {
+                tailDiag = "\n日志摘要:\n" + diag.output;
             }
         }
         postResult(listener, false, "守护进程命令已下发，但暂未收到 Binder 握手，请稍等几秒或查看 /data/local/tmp/extbridge.log" + tailDiag);

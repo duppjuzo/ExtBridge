@@ -34,3 +34,6 @@ ExtBridge (`com.extbridge.helper` & `com.extbridge.daemon.ExtBridge`) is license
 3. **Miuix KMP (`top.yukonga.miuix.kmp:miuix-ui` / `miuix-preference` / `miuix-icons` / `miuix-squircle` `0.9.4`)**
    - Copyright (C) YuKongA and Miuix Contributors (<https://github.com/miuix-kotlin-multiplatform/miuix>)
    - License: [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0)
+4. **Shizuku API, AIDL & Provider (`dev.rikka.shizuku:api` / `aidl` / `provider` `13.1.5`)**
+   - Copyright (C) RikkaApps (<https://github.com/RikkaApps/Shizuku-API>)
+   - License: [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0)

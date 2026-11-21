@@ -216,6 +216,13 @@ fun ActivationSheet(
     hasSuHint: Boolean,
     autoRootEnabled: Boolean,
     onAutoRootChange: (Boolean) -> Unit,
+    shizukuAlive: Boolean,
+    shizukuGranted: Boolean,
+    shizukuInstalled: Boolean,
+    shizukuRationale: Boolean,
+    shizukuSummary: String,
+    autoShizukuEnabled: Boolean,
+    onAutoShizukuChange: (Boolean) -> Unit,
     mdnsHint: String,
     pairHost: String,
     onPairHostChange: (String) -> Unit,
@@ -230,6 +237,9 @@ fun ActivationSheet(
     working: Boolean,
     pcAdbCommand: String,
     onSelectWirelessTab: () -> Unit,
+    onRefreshShizuku: () -> Unit,
+    onRunOrAuthShizuku: () -> Unit,
+    onOpenShizukuApp: () -> Unit,
     onRunRoot: () -> Unit,
     onOpenDevOptions: () -> Unit,
     onSendPairNotif: () -> Unit,
@@ -259,47 +269,18 @@ fun ActivationSheet(
             )
 
             TabRowWithContour(
-                tabs = listOf("Root 激活", "无线调试", "电脑 ADB"),
+                tabs = listOf("无线调试", "Shizuku", "Root", "电脑 ADB"),
                 selectedTabIndex = tabIdx,
                 onTabSelected = { next ->
                     tabIdx = next
-                    if (next == 1) onSelectWirelessTab()
+                    if (next == 0) onSelectWirelessTab()
+                    if (next == 1) onRefreshShizuku()
                 },
                 modifier = Modifier.fillMaxWidth(),
             )
 
             when (tabIdx) {
                 0 -> {
-                    Card(insideMargin = PaddingValues(14.dp)) {
-                        Text(
-                            text = if (hasSuHint) {
-                                "已检测到 su 环境（Magisk / KernelSU / APatch）。一键授权后自动降权至 shell 身份运行，无需开启无线调试。"
-                            } else {
-                                "适合已 Root 设备（Magisk / KernelSU / APatch）。若隐藏了 su 仍可直接点击下方按钮请求授权。"
-                            },
-                            fontSize = 13.sp,
-                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                        )
-                        Spacer(Modifier.height(12.dp))
-                        TextButton(
-                            text = if (working) "正在请求 Root 授权…" else "一键 Root 注册并激活服务",
-                            enabled = !working,
-                            onClick = onRunRoot,
-                            colors = ButtonDefaults.textButtonColorsPrimary(),
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                    }
-                    Card {
-                        SwitchPreference(
-                            title = "启动软件时自动 Root 激活",
-                            summary = "进入应用发现守护进程未运行时静默拉起",
-                            checked = autoRootEnabled,
-                            onCheckedChange = onAutoRootChange,
-                        )
-                    }
-                }
-
-                1 -> {
                     Card(
                         colors = CardDefaults.defaultColors(
                             color = MiuixTheme.colorScheme.primary.copy(alpha = 0.10f),
@@ -383,6 +364,116 @@ fun ActivationSheet(
                             enabled = !working,
                             onClick = onRunWirelessConnect,
                             modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
+
+                1 -> {
+                    val bannerColor = when {
+                        shizukuAlive && shizukuGranted -> HyperGreen.copy(alpha = 0.12f)
+                        shizukuAlive -> MiuixTheme.colorScheme.primary.copy(alpha = 0.10f)
+                        else -> MiuixTheme.colorScheme.secondaryContainer
+                    }
+                    val bannerTextColor = when {
+                        shizukuAlive && shizukuGranted -> HyperGreen
+                        shizukuAlive -> MiuixTheme.colorScheme.primary
+                        else -> MiuixTheme.colorScheme.onSurfaceVariantSummary
+                    }
+                    Card(
+                        colors = CardDefaults.defaultColors(color = bannerColor),
+                        insideMargin = PaddingValues(13.dp),
+                    ) {
+                        Text(
+                            text = shizukuSummary,
+                            fontSize = 12.5.sp,
+                            color = bannerTextColor,
+                        )
+                    }
+
+                    Card(insideMargin = PaddingValues(14.dp)) {
+                        val primaryText = when {
+                            working -> "正在通过 Shizuku 激活…"
+                            shizukuAlive && shizukuGranted -> "一键 Shizuku 激活服务"
+                            shizukuAlive && shizukuRationale -> "前往 Shizuku 手动开启授权"
+                            shizukuAlive -> "授权 Shizuku 并一键激活"
+                            shizukuInstalled -> "打开 Shizuku 启动服务"
+                            else -> "了解 / 下载 Shizuku"
+                        }
+                        TextButton(
+                            text = primaryText,
+                            enabled = !working,
+                            onClick = {
+                                if (shizukuAlive && !shizukuRationale) {
+                                    onRunOrAuthShizuku()
+                                } else {
+                                    onOpenShizukuApp()
+                                }
+                            },
+                            colors = ButtonDefaults.textButtonColorsPrimary(),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        if (shizukuAlive) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                TextButton(
+                                    text = "打开 Shizuku",
+                                    onClick = onOpenShizukuApp,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                TextButton(
+                                    text = "刷新状态",
+                                    onClick = onRefreshShizuku,
+                                    modifier = Modifier.weight(1f),
+                                )
+                            }
+                        } else {
+                            TextButton(
+                                text = "刷新 Shizuku 状态",
+                                onClick = onRefreshShizuku,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    }
+
+                    Card {
+                        SwitchPreference(
+                            title = "启动软件时自动 Shizuku 激活",
+                            summary = "检测到已授权的 Shizuku 服务时静默拉起守护进程",
+                            checked = autoShizukuEnabled,
+                            onCheckedChange = onAutoShizukuChange,
+                        )
+                    }
+                }
+
+                2 -> {
+                    Card(insideMargin = PaddingValues(14.dp)) {
+                        Text(
+                            text = if (hasSuHint) {
+                                "已检测到 su 环境（Magisk / KernelSU / APatch）。一键授权后自动降权至 shell 身份运行，无需开启无线调试。"
+                            } else {
+                                "适合已 Root 设备（Magisk / KernelSU / APatch）。若隐藏了 su 仍可直接点击下方按钮请求授权。"
+                            },
+                            fontSize = 13.sp,
+                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        TextButton(
+                            text = if (working) "正在请求 Root 授权…" else "一键 Root 注册并激活服务",
+                            enabled = !working,
+                            onClick = onRunRoot,
+                            colors = ButtonDefaults.textButtonColorsPrimary(),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                    Card {
+                        SwitchPreference(
+                            title = "启动软件时自动 Root 激活",
+                            summary = "进入应用发现守护进程未运行时静默拉起",
+                            checked = autoRootEnabled,
+                            onCheckedChange = onAutoRootChange,
                         )
                     }
                 }

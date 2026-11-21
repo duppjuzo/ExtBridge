@@ -4,6 +4,18 @@
 
 ---
 
+## v3.5.5beta (`versionCode: 27`) — 2026-11-21
+
+### ✨ 新增「Shizuku 一键激活」第四并列通道 & CI 官方仓库识别保护
+- **新增「Shizuku / Sui 一键秒激活」通道（完整保留内置 `libadb.so` 无线调试 + Root + 电脑 ADB）(`ShizukuBootstrap.java` / `AdbBootstrap.java` / `MainActivity.kt` / `MainSheets.kt`)**
+  - 集成 `dev.rikka.shizuku:api / aidl / provider:13.1.5` 与受 `INTERACT_ACROSS_USERS_FULL` 保护的 `ShizukuProvider`，激活抽屉升级为 **「无线调试 / Shizuku / Root / 电脑 ADB」四通道并列选择**（未安装 Shizuku 的用户仍可零依赖使用内置 `libadb.so` 无线调试；已常驻 Shizuku / Sui 的用户免输配对码一键拉起）。
+  - 采用内存资产标准输入流直写（`cat > /data/local/tmp/extb_<nonce>.jar` + `O_EXCL` 防符号链接 + 256 位 `SHA-256` 校验 + 多分包 `pm path` 兜底），零 `unzip` 依赖；同时自动识别 Shizuku 运行身份（ADB Shell `uid=2000` 直连执行，Root / Sui `uid=0` 自动 `chown 2000:2000` 并通过 `su 2000` + `setsid runcon u:r:shell:s0` 安全降权启动）。
+  - 支持首次点击「授权 Shizuku 并一键激活」授权通过后自动链式拉起守护进程，并提供「启动软件时自动尝试 Shizuku 激活」静默恢复开关。
+- **CI 构建与发版流水线新增「官方仓库识别保护」(`.github/workflows/build.yml` / `build_v3.ps1` / `helper/build.gradle.kts`)**
+  - 新增 `OFFICIAL_REPO (duppjuzo/ExtBridge)` 强校验步骤：自动发布 GitHub Release 严格锁定仅在官方主仓执行；任何非官方 Fork 仓库触发 Actions 构建时自动跳过正式发布密钥阶段，并为产出的 APK 与 Artifact 自动附加 `-unofficial-fork-<owner>` 水印后缀，防止第三方 Fork 构建产物与官方正式签名包混淆；同时支持 `beta / alpha / rc` 标签自动标记 GitHub `Pre-release`。
+
+---
+
 ## v3.5.4 (`versionCode: 26`) — 2026-11-20
 
 ### 🐛 无线调试 `ERR_STAGE_JAR`（小米手机 MIUI / HyperOS）与 Root 一键激活握手机制全面修复

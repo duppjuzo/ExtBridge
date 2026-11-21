@@ -42,7 +42,7 @@
 
 ---
 
-## 2. 激活后台核心守护进程（三种方式任选）
+## 2. 激活后台核心守护进程（四种方式任选）
 
 由于 ExtBridge 坚持**免改系统分区、免 Root 路线**，接管外接物理屏的守护进程（`ExtBridge`）以系统 `shell (uid=2000)` 权限驻留运行。**设备每次重启后需重新激活一次**（平时插拔显示器或关闭屏幕无需重复激活）：
 
@@ -51,9 +51,11 @@ flowchart LR
     Start["打开 ExtBridge 主控台"] --> Check{"守护进程是否在线?"}
     Check -->|"已在线"| Ready["插上显示器即用<br/>自由切换 DeX / 镜像"]
     Check -->|"未运行 (弹出激活抽屉)"| ModeA["方式 A: 本机无线调试<br/>免电脑 · 通知栏填配对码"]
-    Check -->|"未运行 (弹出激活抽屉)"| ModeB["方式 B: 电脑 ADB 一键命令<br/>支持 CMD / PowerShell / Bash"]
-    Check -->|"未运行 (弹出激活抽屉)"| ModeC["方式 C: Root 一键激活<br/>自动降权至 shell (uid=2000)"]
+    Check -->|"未运行 (弹出激活抽屉)"| ModeS["方式 B: Shizuku 一键激活<br/>免配对码 · 秒级静默恢复"]
+    Check -->|"未运行 (弹出激活抽屉)"| ModeB["方式 C: 电脑 ADB 一键命令<br/>支持 CMD / PowerShell / Bash"]
+    Check -->|"未运行 (弹出激活抽屉)"| ModeC["方式 D: Root 一键激活<br/>自动降权至 shell (uid=2000)"]
     ModeA --> Ready
+    ModeS --> Ready
     ModeB --> Ready
     ModeC --> Ready
 ```
@@ -78,7 +80,15 @@ APK 内置了独立的 `arm64-v8a` `adb` 客户端（通过 `0700` 私有 Unix �
 
 ---
 
-### 方式 B：免 Root · 电脑 ADB 一键命令激活
+### 方式 B：免 Root · Shizuku / Sui 一键激活（常驻 Shizuku 用户推荐）
+若手机或平板日常运行 **Shizuku**（无线调试 / ADB 启动）或 **Sui** 模块，无需重复输入无线调试配对码与端口号：
+1. 在激活抽屉切到 **「Shizuku」** 页，点击 **「授权 Shizuku 并一键激活」** 并在弹窗点击「允许」。
+2. 应用将直接通过内存标准输入管道释放经 `SHA-256` 校验的 `extbridge.jar` 并以 `shell (uid=2000)` 身份秒级拉起守护进程。
+3. 开启 **「启动软件时自动 Shizuku 激活」** 后，每次打开 ExtBridge 检测到 Shizuku 在线即自动静默恢复后台服务。
+
+---
+
+### 方式 C：免 Root · 电脑 ADB 一键命令激活
 将平板/手机连上电脑 ADB 后，在激活抽屉切到 **「电脑 ADB」** 点击复制命令（或直接复制下方命令），在 **Windows CMD / PowerShell** 或 **macOS / Linux Bash / Zsh** 终端直接粘贴回车即可（若电脑连了多台设备，请在 `adb` 后加上 `-s <设备序列号>`）：
 
 ```bash
@@ -87,7 +97,7 @@ adb shell "rm -f /data/local/tmp/extb_src.apk /data/local/tmp/extbridge.jar.new 
 
 ---
 
-### 方式 C：已 Root 设备一键静默激活（Magisk / KernelSU / APatch）
+### 方式 D：已 Root 设备一键静默激活（Magisk / KernelSU / APatch）
 1. 在激活抽屉切到 **「Root 激活」** 页，点击 **「一键 Root 注册并激活服务」** 并在超级用户弹窗中授予权限。
 2. 脚本会先校验安装包官方签名证书与 `extbridge.jar` SHA-256 哈希，随后切换至 `shell (uid=2000)` 权限启动守护进程（绝不长期以 `root` 身份驻留运行）。
 3. 勾选下方 **「启动软件时自动 Root 激活」** 后，每次开机打开 ExtBridge 即可全自动静默拉起守护进程。
