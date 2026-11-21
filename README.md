@@ -78,7 +78,7 @@
 │       └── ExtBridge.java                   # 物理屏接管、VirtualDisplay/SurfaceControl 投射、
 │                                            # Binder IPC (UID ACL 鉴权)、分屏/键鼠跨屏注入、亮度管理
 ├── helper/                                  # Android 客户端 App (com.extbridge.helper · Kotlin + Compose + Miuix)
-│   ├── build.gradle.kts                     # AGP 9 + Compose + Miuix 0.9.4 + R8 瘦身配置 (v3.5.4 / code 26)
+│   ├── build.gradle.kts                     # AGP 9 + Compose + Miuix 0.9.4 + R8 瘦身配置 (v3.5.5beta / code 27)
 │   ├── AndroidManifest.xml                  # 清单声明与 ControlReceiver 契约
 │   ├── jniLibs/arm64-v8a/libadb.so          # 内置 arm64 adb 二进制，供免电脑无线调试自激活使用
 │   ├── res/
@@ -146,6 +146,23 @@ powershell -ExecutionPolicy Bypass -File .\build_v3.ps1
 
 1. **桌面渲染分辨率 (`VirtualDisplay`) vs 外接物理输出 (`EDID`)**：部分设备（如 Xiaomi HyperOS 正式版固件）由系统 `DisplayModeDirectorImpl` / `SurfaceFlinger` 锁死物理输出档位，显示器 OSD 菜单仍显示 `1080p@60` 或 `2K@60`；但 ExtBridge 控制台调节的 **`VirtualDisplay` 实际画布分辨率** 在所有机型上 100% 生效，可真实实现 **720p 降载稳帧省电**、**4K 超采样锐化**、**自由宽高比** 与 **90°/270° 竖屏满铺**。
 2. **坚持免 Root 路线**：ExtBridge 不改写系统分区，也不会提供用于 Hook 系统框架或 `SurfaceFlinger` 的 Zygisk/LSPosed Root 模块；如需彻底重置单应用 `am compat` 策略，请在控制台「分应用显示模式」点击 **「↺ 全部重置为默认」**，或执行 `adb shell am compat reset-all <packageName>`。
+
+---
+
+## 🛡️ 官方发布渠道、签名验真与二开分发规范
+
+- **官方唯一发布仓库**：[`https://github.com/duppjuzo/ExtBridge`](https://github.com/duppjuzo/ExtBridge)（GitHub Releases）
+- **官方 APK 签名证书 SHA-256 指纹**：
+  ```text
+  e4f67b3012a16633006c64bfc9d5a95c7bdda10826bd729777c2a3066f49117c
+  ```
+  - 所有官方正式版与测试版 APK 均使用上述同一证书签名，支持直接覆盖升级；安装前可通过 `apksigner verify --print-certs <apk>` 或系统包检查工具核对指纹。
+  - 若从非官方 Fork 或第三方渠道下载了重签名魔改包，出现**签名冲突无法覆盖升级、核心功能被裁剪（如无线调试）或运行异常**时，请联系对应二开仓库处理，主仓仅对官方签名构建提供支持。
+- **Fork / 二次开发与分发约定**：
+  - 欢迎基于 [MIT License](LICENSE) 进行学习、修改与二次开发，也欢迎通过 Pull Request 向主仓贡献改进。
+  - 若需要**对外分发非官方编译产物（APK / Release）**，请遵守基本的开源协作边界：
+    1. **修改包名 (`applicationId`)**：避免沿用 `com.extbridge.helper` 导致与官方版产生签名冲突，方便用户并存测试；
+    2. **区分版本号与命名**：更换签名后无法覆盖升级官方版本，请勿顺延或抢占上游版本号（如直接发布 `ExtBridge_v3.5.5.apk` / `v4.0.0`），请在版本号与发布标题中明确附加 Fork 标识（例如 `v3.5.5-fork.<owner>`）并注明为非官方修改版。
 
 ---
 

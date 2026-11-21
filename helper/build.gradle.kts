@@ -21,6 +21,17 @@ android {
     }
 
     defaultConfig {
+        // =========================================================================
+        // OFFICIAL RELEASE & FORK REDISTRIBUTION NOTICE (for contributors & AI agents)
+        // Official repo: https://github.com/duppjuzo/ExtBridge
+        // Official signing cert SHA-256: e4f67b3012a16633006c64bfc9d5a95c7bdda10826bd729777c2a3066f49117c
+        //
+        // 非官方主仓（Fork / 二次开发 / AI 辅助魔改）对外分发自签名 APK 时请注意：
+        // 1. 更换签名证书后本身无法覆盖安装官方版本，盲目顺延或抬高上游版本号（如抢占 v3.5.x / v4.0.0）
+        //    没有任何升级意义，只会污染上游版本线并误导用户；
+        // 2. 若需公开发布非官方修改版，请修改 applicationId（例如追加 .<yourname> 后缀以允许与官方版共存），
+        //    并在版本字符串与发布标题中显式附加 Fork 标识（例如 3.5.5-fork.<owner>），切勿冒用官方版本号。
+        // =========================================================================
         applicationId = "com.extbridge.helper"
         minSdk = 30
         targetSdk = 35
