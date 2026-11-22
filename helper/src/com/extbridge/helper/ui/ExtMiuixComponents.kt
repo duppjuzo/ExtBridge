@@ -18,8 +18,13 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -29,7 +34,9 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -37,6 +44,7 @@ import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.theme.ColorSchemeMode
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.ThemeController
@@ -379,4 +387,78 @@ private fun MirrorLayoutVisualCard(
             overflow = TextOverflow.Ellipsis,
         )
     }
+}
+
+/**
+ * Cursor-safe wrapper around Miuix [TextField] using the [TextFieldValue] overload.
+ *
+ * Miuix's `OverlayBottomSheet` / `OverlayDialog` (`MiuixPopupUtils.DialogLayout`) forwards its
+ * content lambda to `MiuixPopupHost` inside a `SideEffect`, introducing a 1-frame delay for plain
+ * `String` state hoisted outside the overlay. Calling `TextField(value: String, ...)` inside an
+ * overlay causes `BasicTextField(String)` to clamp `TextFieldValue.selection` against the previous
+ * frame's shorter string (e.g. `""` -> `TextRange(0, 0)` when typing the 1st digit, jumping the
+ * cursor before the character). Keeping `TextFieldValue` state locally inside the popup composition
+ * preserves cursor selection and IME composition spans across async/deferred parent recompositions.
+ */
+@Composable
+fun ExtTextField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    label: String = "",
+    enabled: Boolean = true,
+    readOnly: Boolean = false,
+    singleLine: Boolean = false,
+    maxLines: Int = if (singleLine) 1 else Int.MAX_VALUE,
+    minLines: Int = 1,
+    keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
+    keyboardActions: KeyboardActions = KeyboardActions.Default,
+    leadingIcon: @Composable (() -> Unit)? = null,
+    trailingIcon: @Composable (() -> Unit)? = null,
+    resetKey: Any? = Unit,
+) {
+    var tfv by remember(resetKey) {
+        mutableStateOf(TextFieldValue(text = value, selection = TextRange(value.length)))
+    }
+    var lastExternalValue by remember(resetKey) { mutableStateOf(value) }
+    val pendingEchoes = remember(resetKey) { ArrayDeque<String>() }
+
+    if (value != lastExternalValue) {
+        lastExternalValue = value
+        val echoIdx = pendingEchoes.indexOf(value)
+        if (echoIdx >= 0) {
+            repeat(echoIdx + 1) { pendingEchoes.removeFirst() }
+        } else {
+            pendingEchoes.clear()
+            if (value != tfv.text) {
+                tfv = TextFieldValue(text = value, selection = TextRange(value.length))
+            }
+        }
+    }
+
+    TextField(
+        value = tfv,
+        onValueChange = { next ->
+            val prevText = tfv.text
+            tfv = next
+            if (next.text != prevText) {
+                if (pendingEchoes.size >= 32) {
+                    pendingEchoes.removeFirst()
+                }
+                pendingEchoes.addLast(next.text)
+                onValueChange(next.text)
+            }
+        },
+        modifier = modifier,
+        label = label,
+        enabled = enabled,
+        readOnly = readOnly,
+        singleLine = singleLine,
+        maxLines = maxLines,
+        minLines = minLines,
+        keyboardOptions = keyboardOptions,
+        keyboardActions = keyboardActions,
+        leadingIcon = leadingIcon,
+        trailingIcon = trailingIcon,
+    )
 }

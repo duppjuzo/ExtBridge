@@ -1,4 +1,4 @@
-# ExtBridge (`v3.5.5beta`) — Android 免 Root Type-C 类 DeX 扩展桌面与增强镜像副屏系统
+# ExtBridge (`v3.5.5`) — Android 免 Root Type-C 类 DeX 扩展桌面与增强镜像副屏系统
 
 > **无需 Root · 单 APK 四模自激活（无线调试 / Shizuku / Root / 电脑 ADB）· Xiaomi HyperOS 原生澎湃视觉 (`Compose + Miuix`) · 支持「DeX 独立扩展桌面」与「增强原生镜像信息副屏」双工作模式 · [📖 完整图文使用说明书](docs/USER_GUIDE.md) · [🚀 对比 v3.2 全量升级图文与激活详解](docs/UPGRADE_FROM_v3.2.md) · [📝 更新日志](CHANGELOG.md)**
 
@@ -78,7 +78,7 @@
 │       └── ExtBridge.java                   # 物理屏接管、VirtualDisplay/SurfaceControl 投射、
 │                                            # Binder IPC (UID ACL 鉴权)、分屏/键鼠跨屏注入、亮度管理
 ├── helper/                                  # Android 客户端 App (com.extbridge.helper · Kotlin + Compose + Miuix)
-│   ├── build.gradle.kts                     # AGP 9 + Compose + Miuix 0.9.4 + R8 瘦身配置 (v3.5.5beta / code 27)
+│   ├── build.gradle.kts                     # AGP 9 + Compose + Miuix 0.9.4 + R8 瘦身配置 (v3.5.5 / code 28)
 │   ├── AndroidManifest.xml                  # 清单声明与 ControlReceiver 契约
 │   ├── jniLibs/arm64-v8a/libadb.so          # 内置 arm64 adb 二进制，供免电脑无线调试自激活使用
 │   ├── res/
@@ -101,6 +101,7 @@
 │       └── AdbPairingReceiver.java          # 通知栏 6 位配对码快捷响应
 ├── docs/
 │   ├── USER_GUIDE.md                        # 完整图文使用说明书
+│   ├── RELEASE_v3.5.5.md                    # v3.5.5 版本发布与更新说明
 │   ├── RELEASE_v3.5.4.md                    # v3.5.4 版本发布与更新说明
 │   ├── RELEASE_v3.5.3.md                    # v3.5.3 版本发布与更新说明
 │   └── images/                              # GitHub 文档实机截图素材
@@ -117,7 +118,7 @@
 详细图文步骤与各模式操作说明请阅读 **[📖 docs/USER_GUIDE.md](docs/USER_GUIDE.md)**。
 
 ### 核心 3 步：
-1. 安装 `ExtBridge_v3.5.5beta.apk`，首次打开按提示授予 **通知**、**悬浮窗** 与 **无障碍服务 (`ExtBridge 平板辅助手势`)** 权限（小米等设备建议在开发者选项开启「USB 调试（安全设置）」以允许点击注入）。
+1. 安装 `ExtBridge_v3.5.5.apk`，首次打开按提示授予 **通知**、**悬浮窗** 与 **无障碍服务 (`ExtBridge 平板辅助手势`)** 权限（小米等设备建议在开发者选项开启「USB 调试（安全设置）」以允许点击注入）。
 2. 在激活弹窗中任选其一启动守护进程：
    - **免 Root 本机无线调试**：打开系统无线调试后在通知栏直接填 6 位配对码自激活；
    - **Shizuku 一键激活**：若本机已运行 Shizuku / Sui，点击授权即可免配对码秒级拉起并支持启动时自动恢复；

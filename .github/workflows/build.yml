@@ -159,9 +159,15 @@ jobs:
             $kts = Get-Content -Raw -Path ".\helper\build.gradle.kts" -Encoding UTF8
             if ($kts -match 'versionName\s*=\s*"([^"]+)"') { $ver = $Matches[1] }
           }
-          if (-not $ver) { $ver = "3.5.5beta" }
+          if (-not $ver) { $ver = "3.5.5" }
           $forkTag = if ($env:FORK_SUFFIX) { $env:FORK_SUFFIX } else { "" }
           $artifactName = "ExtBridge_v$ver$forkTag"
+          $relDoc = ".\docs\RELEASE_v$ver.md"
+          if (Test-Path $relDoc) {
+            Copy-Item -Path $relDoc -Destination ".\build\out\RELEASE_NOTES.md" -Force
+          } else {
+            "# ExtBridge v$ver`n`n详见 [CHANGELOG.md](https://github.com/duppjuzo/ExtBridge/blob/main/CHANGELOG.md)。" | Set-Content -Path ".\build\out\RELEASE_NOTES.md" -Encoding UTF8
+          }
           if ((Test-Path ".\build\out\exthelper.apk") -and ($env:IS_OFFICIAL_REPO -eq '1')) {
             $apkName = "ExtBridge_v$ver.apk"
             Copy-Item -Path ".\build\out\exthelper.apk" -Destination ".\build\out\$apkName" -Force
@@ -205,6 +211,7 @@ jobs:
           path: |
             ${{ env.APK_PATH }}
             build/out/extbridge.jar
+            build/out/RELEASE_NOTES.md
           if-no-files-found: error
           retention-days: 90
 
@@ -258,6 +265,7 @@ jobs:
         with:
           tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v{0}', needs.build.outputs.app_version) }}
           name: ExtBridge v${{ needs.build.outputs.app_version }}
+          body_path: dist/RELEASE_NOTES.md
           generate_release_notes: true
           prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') || contains(github.ref_name, 'rc') }}
           fail_on_unmatched_files: true

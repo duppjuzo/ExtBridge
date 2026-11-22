@@ -4,6 +4,17 @@
 
 ---
 
+## v3.5.5 (`versionCode: 28`) — 2026-11-22
+
+### 🐛 Bug 修复与正式版转正
+- **修复无线调试输入配对码（及弹窗输入框）输入第 1 个数字后光标跳到数字前面的 Bug (`ExtMiuixComponents.kt` / `MainSheets.kt` / `MainActivity.kt` / `TouchpadActivity.kt`)**
+  - **根因**：`Miuix 0.9.4` 的 `OverlayBottomSheet` / `OverlayDialog`（`MiuixPopupUtils.DialogLayout`）通过 `SideEffect` 向根节点 `MiuixPopupHost` 投递弹窗内容闭包，外部传入的纯 `String` 状态存在 1 帧滞后；原先使用 `TextField(value: String)` 时，底层 `BasicTextField(String)` 在第 1 帧重组中收到旧空串 `""`，将刚输入首字符后的光标 `TextRange(1, 1)` 截断重置为 `TextRange(0, 0)`，导致光标跳回第 1 个数字前方。
+  - **修复**：新增基于 `TextFieldValue` 重载封装的 `ExtTextField` 组件，在弹窗内部合成作用域直接托管完整的 `TextFieldValue`（含光标 `selection` 与中文输入法 `composition` 预编辑区间）并过滤跨层 1 帧旧值回显；无线调试页（`6 位配对码`、`配对端口`、`连接端口`、`本机 IP`）、自定义分辨率、边栏便签、自定义颜色、小组件搜索、分应用搜索及大触摸板远程输入共 11 处输入框全面升级。
+- **正式版转正（合并 `v3.5.5beta` 全部特性）**
+  - 「Shizuku / Sui 一键激活」第四并列通道（完整保留内置 `libadb.so` 无线调试 / Root / 电脑 ADB）、CI 官方仓库识别保护及官方文档签名证书 SHA-256 指纹声明随 `v3.5.5` 正式版发布；CI 自动发版流水线同步接入 `docs/RELEASE_v*.md` 中文更新说明正文。
+
+---
+
 ## v3.5.5beta (`versionCode: 27`) — 2026-11-21
 
 ### ✨ 新增「Shizuku 一键激活」第四并列通道 & CI 官方仓库识别保护

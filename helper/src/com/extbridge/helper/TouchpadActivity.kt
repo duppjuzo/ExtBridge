@@ -59,6 +59,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -111,7 +112,7 @@ class TouchpadActivity : ComponentActivity() {
     private var useCtrlV by mutableStateOf(false)
     private var oneHandPortrait by mutableStateOf(false)
     private var imeVisible by mutableStateOf(false)
-    private var imeText by mutableStateOf("")
+    private var imeField by mutableStateOf(TextFieldValue(""))
     private var dragLocked by mutableStateOf(false)
     private var inputToExt by mutableStateOf(true)
     private var injectDenied by mutableStateOf(false)
@@ -267,7 +268,7 @@ class TouchpadActivity : ComponentActivity() {
     }
 
     private fun commitImeText() {
-        val txt = imeText
+        val txt = imeField.text
         if (txt.isEmpty()) {
             Thread { BridgeClient.sendKey(KeyEvent.KEYCODE_ENTER, 0) }.start()
             return
@@ -283,7 +284,7 @@ class TouchpadActivity : ComponentActivity() {
                 Thread { BridgeClient.sendPaste(ctrlV) }.start()
             }, 35L)
         }
-        imeText = ""
+        imeField = TextFieldValue("")
     }
 
     private fun applyMouseResultOnUi(type: Int, xy: IntArray?) {
@@ -654,8 +655,8 @@ class TouchpadActivity : ComponentActivity() {
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 TextField(
-                                    value = imeText,
-                                    onValueChange = { imeText = it },
+                                    value = imeField,
+                                    onValueChange = { imeField = it },
                                     label = "输入中英文直达外接屏…",
                                     singleLine = true,
                                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),

@@ -76,6 +76,7 @@ import com.extbridge.helper.ui.DevOptionsGuideDialog
 import com.extbridge.helper.ui.DiagnosticsSheet
 import com.extbridge.helper.ui.EdidAndRefreshSheet
 import com.extbridge.helper.ui.ExtHyperTheme
+import com.extbridge.helper.ui.ExtTextField
 import com.extbridge.helper.ui.ExtThemePrefs
 import com.extbridge.helper.ui.ExtVectorIcons
 import com.extbridge.helper.ui.HyperAmber
@@ -108,7 +109,6 @@ import top.yukonga.miuix.kmp.basic.SmallTopAppBar
 import top.yukonga.miuix.kmp.basic.TabRowWithContour
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
-import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.preference.OverlayDropdownPreference
@@ -344,8 +344,8 @@ class MainActivity : ComponentActivity() {
         }
 
         val verName = runCatching {
-            packageManager.getPackageInfo(packageName, 0).versionName ?: "3.5.5beta"
-        }.getOrDefault("3.5.5beta")
+            packageManager.getPackageInfo(packageName, 0).versionName ?: "3.5.5"
+        }.getOrDefault("3.5.5")
 
         setContent {
             ExtHyperTheme(themeModeIndex = themeModeIdx) {
@@ -1389,7 +1389,7 @@ class MainActivity : ComponentActivity() {
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             item {
-                TextField(
+                ExtTextField(
                     value = searchQuery,
                     onValueChange = { searchQuery = it },
                     label = "搜索应用名称或包名（如：微信 / 夸克 / 红果）",

@@ -35,8 +35,8 @@ android {
         applicationId = "com.extbridge.helper"
         minSdk = 30
         targetSdk = 35
-        versionCode = 27
-        versionName = "3.5.5beta"
+        versionCode = 28
+        versionName = "3.5.5"
         ndk {
             abiFilters += "arm64-v8a"
         }

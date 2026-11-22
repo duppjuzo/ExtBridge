@@ -52,7 +52,6 @@ import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.TabRowWithContour
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
-import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.overlay.OverlayBottomSheet
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.preference.OverlayDropdownPreference
@@ -311,40 +310,44 @@ fun ActivationSheet(
                         )
                     }
 
-                    TextField(
+                    ExtTextField(
                         value = pairHost,
                         onValueChange = onPairHostChange,
                         label = "本机 IP 地址 (如 192.168.31.20)",
                         singleLine = true,
+                        resetKey = show,
                         modifier = Modifier.fillMaxWidth(),
                     )
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        TextField(
+                        ExtTextField(
                             value = pairPort,
                             onValueChange = onPairPortChange,
                             label = "配对端口",
                             singleLine = true,
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            resetKey = show,
                             modifier = Modifier.weight(1f),
                         )
-                        TextField(
+                        ExtTextField(
                             value = pairCode,
                             onValueChange = onPairCodeChange,
                             label = "6 位配对码",
                             singleLine = true,
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            resetKey = show,
                             modifier = Modifier.weight(1f),
                         )
                     }
-                    TextField(
+                    ExtTextField(
                         value = connPort,
                         onValueChange = onConnPortChange,
                         label = "连接端口 (已配对过仅填此项即可)",
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        resetKey = show,
                         modifier = Modifier.fillMaxWidth(),
                     )
 
@@ -686,21 +689,23 @@ fun CustomResolutionDialog(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                TextField(
+                ExtTextField(
                     value = wText,
                     onValueChange = { wText = it },
                     label = "宽度 (W)",
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    resetKey = show,
                     modifier = Modifier.weight(1f),
                 )
                 Text("×", fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                TextField(
+                ExtTextField(
                     value = hText,
                     onValueChange = { hText = it },
                     label = "高度 (H)",
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    resetKey = show,
                     modifier = Modifier.weight(1f),
                 )
             }
@@ -1059,12 +1064,13 @@ fun MirrorMemoDialog(
         onDismissRequest = onDismiss,
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            TextField(
+            ExtTextField(
                 value = memo,
                 onValueChange = { memo = it },
                 label = "输入待办、会议提醒或备忘文字…",
                 minLines = 3,
                 maxLines = 6,
+                resetKey = show,
                 modifier = Modifier.fillMaxWidth(),
             )
             Row(
@@ -1112,11 +1118,12 @@ fun CustomMirrorColorDialog(
         onDismissRequest = onDismiss,
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            TextField(
+            ExtTextField(
                 value = hex,
                 onValueChange = { hex = it },
                 label = "#RRGGBB",
                 singleLine = true,
+                resetKey = show,
                 modifier = Modifier.fillMaxWidth(),
             )
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -1226,11 +1233,12 @@ fun MirrorWidgetSlotSheet(
                 )
             }
 
-            TextField(
+            ExtTextField(
                 value = query,
                 onValueChange = { query = it },
                 label = "搜索系统小组件名称或所属应用…",
                 singleLine = true,
+                resetKey = show,
                 modifier = Modifier.fillMaxWidth(),
             )
 
