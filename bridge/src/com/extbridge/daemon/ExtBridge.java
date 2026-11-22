@@ -1253,6 +1253,7 @@ public class ExtBridge implements Runnable {
             int vdFlags = (sFullscreenPolicy == 1) ? VD_FLAGS_DEX_FIXED : VD_FLAGS_COMPAT;
             vdcBCls.getMethod("setFlags", int.class).invoke(vdcB, vdFlags);
             try { vdcBCls.getMethod("setHomeSupported", boolean.class).invoke(vdcB, false); } catch (Throwable ignored) {}
+            try { vdcBCls.getMethod("setDisplayImePolicy", int.class).invoke(vdcB, 0); } catch (Throwable ignored) {}
             try { vdcBCls.getMethod("setRequestedRefreshRate", float.class).invoke(vdcB, sVirtFps); } catch (Throwable ignored) {}
             vdcBCls.getMethod("setSurface", Surface.class).invoke(vdcB, sSurf);
             Object vdc = vdcBCls.getMethod("build").invoke(vdcB);
@@ -2425,6 +2426,7 @@ public class ExtBridge implements Runnable {
                 }
                 sVd.resize(sVirtW, sVirtH, sVirtDpi);
                 sVd.setSurface(newSurf);
+                applyDisplayLocalImePolicy(sVdId);
 
                 sBbq = newBbq;
                 sSurf = newSurf;
@@ -2513,6 +2515,21 @@ public class ExtBridge implements Runnable {
                 java.util.Collections.sort(descs);
                 sLastExtInputSig = String.join("|", descs);
                 sLastExtInputCnt = extCnt;
+                if (sMirrorMode == 0 && sVdId > 0 && sInputToExt != 0) {
+                    applyDisplayLocalImePolicy(sVdId);
+                    if (extCnt > 0) {
+                        final int targetVd = sVdId;
+                        if (sHandler != null) {
+                            sHandler.post(() -> {
+                                if (sMirrorMode == 0 && sVdId == targetVd && sInputToExt != 0) {
+                                    focusDisplayForKey(targetVd);
+                                }
+                            });
+                        } else {
+                            focusDisplayForKey(targetVd);
+                        }
+                    }
+                }
                 System.out.println("EXTBRIDGE_INPUT_MODE=" + sInputToExt + " count=" + extCnt);
                 notifyHelperSync();
             } catch (Throwable t) {
@@ -2761,6 +2778,14 @@ public class ExtBridge implements Runnable {
                             dispatchMouseMotion(MotionEvent.ACTION_BUTTON_RELEASE, now, tx, ty, 0, MotionEvent.BUTTON_PRIMARY, 0f, 0f, disp);
                             dispatchMouseMotion(MotionEvent.ACTION_UP, now, tx, ty, 0, 0, 0f, 0f, disp);
                             dispatchMouseMotion(MotionEvent.ACTION_HOVER_MOVE, now, tx, ty, 0, 0, 0f, 0f, disp);
+                            if (!mirror && disp == sVdId && sHandler != null) {
+                                final int targetVd = disp;
+                                sHandler.postDelayed(() -> {
+                                    if (sMirrorMode == 0 && sVdId == targetVd) {
+                                        focusDisplayForKey(targetVd);
+                                    }
+                                }, 35L);
+                            }
                         }
                         break;
                     }
@@ -2812,6 +2837,14 @@ public class ExtBridge implements Runnable {
                             dispatchMouseMotion(MotionEvent.ACTION_BUTTON_RELEASE, now, tx, ty, 0, MotionEvent.BUTTON_PRIMARY, 0f, 0f, disp);
                             dispatchMouseMotion(MotionEvent.ACTION_UP, now, tx, ty, 0, 0, 0f, 0f, disp);
                             dispatchMouseMotion(MotionEvent.ACTION_HOVER_MOVE, now + 5, tx, ty, 0, 0, 0f, 0f, disp);
+                            if (!mirror && disp == sVdId && sHandler != null) {
+                                final int targetVd = disp;
+                                sHandler.postDelayed(() -> {
+                                    if (sMirrorMode == 0 && sVdId == targetVd) {
+                                        focusDisplayForKey(targetVd);
+                                    }
+                                }, 35L);
+                            }
                         }
                         break;
                     }
@@ -3205,6 +3238,14 @@ public class ExtBridge implements Runnable {
             ActivityOptions opts = makeExtLaunchOptionsForMode(sVdId, mode);
             Object rc = sMStartActivity.invoke(sAtm, null, "com.android.shell", null, intent, null, null, null, 0, 0, null, opts.toBundle());
             if (sHandler != null) {
+                final int targetVd = sVdId;
+                if (sInputToExt != 0 && targetVd > 0) {
+                    sHandler.postDelayed(() -> {
+                        if (sMirrorMode == 0 && sVdId == targetVd && sInputToExt != 0) {
+                            focusDisplayForKey(targetVd);
+                        }
+                    }, 120L);
+                }
                 sHandler.postDelayed(() -> enforceRunningExtTasksFullscreen(sFullscreenPolicy == 1), 180L);
             }
             return !(rc instanceof Integer) || (Integer) rc >= 0;
@@ -3274,11 +3315,14 @@ public class ExtBridge implements Runnable {
         restoreGlobalFullscreenPrefs();
 
         if (vdId <= 0 || sWm == null) return;
-        // Keep system decors off on virtual display so Display 0 gesture navigation stays isolated.
+        // Keep system decors off on virtual display so Display 0 gesture navigation stays isolated,
+        // while explicitly configuring DISPLAY_IME_POLICY_LOCAL (0) so physical-keyboard Chinese IME
+        // candidate bars and soft keyboards mount on the external DeX VirtualDisplay instead of Display 0.
         try {
             sWm.getClass().getMethod("setShouldShowSystemDecors", int.class, boolean.class)
                     .invoke(sWm, vdId, false);
         } catch (Throwable ignored) {}
+        applyDisplayLocalImePolicy(vdId);
         boolean ignoredApplied = false;
         try {
             for (Method m : sWm.getClass().getMethods()) {
@@ -3339,6 +3383,55 @@ public class ExtBridge implements Runnable {
                 }
             }
         } catch (Throwable ignored) {}
+    }
+
+    /**
+     * Enforces {@code WindowManager.DISPLAY_IME_POLICY_LOCAL (0)} on the DeX {@link VirtualDisplay}.
+     *
+     * <p>When {@code setShouldShowSystemDecors(vdId, false)} is used (to preserve Display 0 gesture
+     * navigation), Android's {@code DisplayWindowSettings} otherwise defaults the virtual display to
+     * {@code DISPLAY_IME_POLICY_FALLBACK_DISPLAY (1)}, parenting {@code ImeContainer} onto Display 0
+     * and preventing external physical keyboard Chinese/CJK IME candidate bars from appearing on the
+     * external monitor.
+     */
+    private static void applyDisplayLocalImePolicy(int vdId) {
+        if (vdId <= 0 || sWm == null) return;
+        boolean applied = false;
+        try {
+            Method setImeM = sWm.getClass().getMethod("setDisplayImePolicy", int.class, int.class);
+            setImeM.invoke(sWm, vdId, 0); // WindowManager.DISPLAY_IME_POLICY_LOCAL = 0
+            applied = true;
+            try {
+                Method getImeM = sWm.getClass().getMethod("getDisplayImePolicy", int.class);
+                Object cur = getImeM.invoke(sWm, vdId);
+                System.out.println("EXTBRIDGE_IME_POLICY vdId=" + vdId + " policy=" + cur);
+            } catch (Throwable ignored) {
+                System.out.println("EXTBRIDGE_IME_POLICY vdId=" + vdId + " set=LOCAL(0)");
+            }
+        } catch (NoSuchMethodException nsme) {
+            // Android 11 (API 30) fallback prior to setDisplayImePolicy
+            try {
+                Method legacyM = sWm.getClass().getMethod("setShouldShowIme", int.class, boolean.class);
+                legacyM.invoke(sWm, vdId, true);
+                applied = true;
+                System.out.println("EXTBRIDGE_IME_POLICY vdId=" + vdId + " legacyShouldShowIme=true");
+            } catch (Throwable t2) {
+                System.err.println("EXTBRIDGE_IME_POLICY_LEGACY_ERR vdId=" + vdId + ": " + t2);
+            }
+        } catch (Throwable t) {
+            Throwable root = (t instanceof InvocationTargetException && t.getCause() != null) ? t.getCause() : t;
+            System.err.println("EXTBRIDGE_IME_POLICY_ERR vdId=" + vdId + ": " + root);
+        }
+        if (!applied && Build.VERSION.SDK_INT >= 31) {
+            try {
+                for (Method m : sWm.getClass().getMethods()) {
+                    if ("setDisplayImePolicy".equals(m.getName()) && m.getParameterCount() == 2) {
+                        m.invoke(sWm, vdId, 0);
+                        break;
+                    }
+                }
+            } catch (Throwable ignored) {}
+        }
     }
 
     private static void applyAppModeCompat(String pkg, int mode, boolean forceApply) {
@@ -5976,6 +6069,18 @@ public class ExtBridge implements Runnable {
                             + "settings put system screen_brightness 1; "
                             + "cmd display set-brightness " + String.format(java.util.Locale.US, "%.6f", minFloat) + " 2>/dev/null || true");
                     sScreenDimmed = true;
+                    if (sMirrorMode == 0 && sVdId > 0 && sInputToExt != 0) {
+                        final int targetVd = sVdId;
+                        if (sHandler != null) {
+                            sHandler.postDelayed(() -> {
+                                if (sMirrorMode == 0 && sVdId == targetVd && sInputToExt != 0) {
+                                    focusDisplayForKey(targetVd);
+                                }
+                            }, 60L);
+                        } else {
+                            focusDisplayForKey(targetVd);
+                        }
+                    }
                     System.out.println("EXTBRIDGE_SCREEN_DIM=1 min=" + minFloat + " savedMode=" + sSavedBrightMode + " savedInt=" + sSavedBrightInt + " savedFloat=" + sSavedBrightFloat);
                     return true;
                 } else {

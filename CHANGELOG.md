@@ -4,6 +4,15 @@
 
 ---
 
+## v3.5.6 (`versionCode: 29`) — 2026-11-22
+
+### 🐛 Bug 修复：DeX 模式下外置物理键盘中文打字外屏显示候选词栏
+- **修复 DeX 独立桌面模式下外置物理键盘输入中文时外接屏不显示候选词（备选词）的问题 (`ExtBridge.java` / `BridgeService.java`)**
+  - **根因**：DeX 虚拟屏为隔离主屏全面屏手势关闭了 `shouldShowSystemDecors`，导致 Android `DisplayWindowSettings` 默认将虚拟屏设为 `DISPLAY_IME_POLICY_FALLBACK_DISPLAY (1)`，将输入法 `ImeContainer`（含物理键盘中文候选词条/悬浮窗）挂载在主屏 `Display 0` 而非外接屏。
+  - **修复**：在保留 `setShouldShowSystemDecors(vdId, false)` 的同时，为 DeX 虚拟屏显式配置 `IWindowManager.setDisplayImePolicy(vdId, 0 /* DISPLAY_IME_POLICY_LOCAL */)`（含 `VirtualDisplayConfig.Builder` 预置、动态调参重申及 Android 11 `setShouldShowIme(vdId, true)` 兼容兜底）；补齐外设绑定、应用启动、虚拟触摸板点击及主屏一键黑屏后的 `focusDisplayForKey(sVdId)` 顶层焦点同步；并在 `BridgeService` 新增 `WindowInsets.Type.ime()` 监听，外屏弹出底部候选栏或软键盘时底部 Dock 自动平滑避让不遮挡。
+
+---
+
 ## v3.5.5 (`versionCode: 28`) — 2026-11-22
 
 ### 🐛 Bug 修复与正式版转正

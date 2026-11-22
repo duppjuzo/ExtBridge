@@ -344,8 +344,8 @@ class MainActivity : ComponentActivity() {
         }
 
         val verName = runCatching {
-            packageManager.getPackageInfo(packageName, 0).versionName ?: "3.5.5"
-        }.getOrDefault("3.5.5")
+            packageManager.getPackageInfo(packageName, 0).versionName ?: "3.5.6"
+        }.getOrDefault("3.5.6")
 
         setContent {
             ExtHyperTheme(themeModeIndex = themeModeIdx) {

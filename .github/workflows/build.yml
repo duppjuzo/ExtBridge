@@ -159,7 +159,7 @@ jobs:
             $kts = Get-Content -Raw -Path ".\helper\build.gradle.kts" -Encoding UTF8
             if ($kts -match 'versionName\s*=\s*"([^"]+)"') { $ver = $Matches[1] }
           }
-          if (-not $ver) { $ver = "3.5.5" }
+          if (-not $ver) { $ver = "3.5.6" }
           $forkTag = if ($env:FORK_SUFFIX) { $env:FORK_SUFFIX } else { "" }
           $artifactName = "ExtBridge_v$ver$forkTag"
           $relDoc = ".\docs\RELEASE_v$ver.md"

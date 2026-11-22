@@ -57,6 +57,7 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
+import android.view.WindowInsets;
 import android.view.WindowManager;
 import android.view.animation.AccelerateInterpolator;
 import android.view.animation.DecelerateInterpolator;
@@ -168,6 +169,7 @@ public class BridgeService extends Service {
     private boolean mAutoHideScheduled = false;
     private boolean mIsOnLauncherHome = true;
     private boolean mDockHovered = false;
+    private boolean mExtImeVisible = false;
     private FrameLayout mDockEdgeTrigger;
     private View mDockEdgePill;
     private WindowManager.LayoutParams mDockEdgeLp;
@@ -225,7 +227,7 @@ public class BridgeService extends Service {
     private boolean mTrayPressed = false;
     private final Runnable mAutoHideDockTask = () -> {
         mAutoHideScheduled = false;
-        if (mDockAutoHide && !mIsOnLauncherHome && !mPanelOpen && !mSplitMenuOpen && !mDockHovered && !mTrayPressed) {
+        if ((mDockAutoHide || mExtImeVisible) && !mIsOnLauncherHome && !mPanelOpen && !mSplitMenuOpen && !mDockHovered && !mTrayPressed) {
             applyDockHiddenAnimated(true);
         }
     };
@@ -1636,6 +1638,32 @@ public class BridgeService extends Service {
                 if (mPanelOpen) repositionPanel();
             }
         });
+        attachExtImeInsetsWatcher(mDockRoot);
+    }
+
+    private void attachExtImeInsetsWatcher(View view) {
+        if (view == null || Build.VERSION.SDK_INT < 30) return;
+        view.setOnApplyWindowInsetsListener((v, insets) -> {
+            if (insets != null) {
+                boolean imeVis = insets.isVisible(WindowInsets.Type.ime());
+                int imeBottom = insets.getInsets(WindowInsets.Type.ime()).bottom;
+                boolean nowIme = imeVis && imeBottom > 0;
+                if (nowIme != mExtImeVisible) {
+                    mExtImeVisible = nowIme;
+                    mHandler.post(() -> {
+                        if (mDestroyed) return;
+                        if (mExtImeVisible) {
+                            if (!mInLauncherHost && !mDockHidden && !mPanelOpen && !mSplitMenuOpen && !mDockHovered && !mTrayPressed) {
+                                applyDockHiddenAnimated(true);
+                            }
+                        } else {
+                            evaluateDockAutoHide(false);
+                        }
+                    });
+                }
+            }
+            return insets;
+        });
     }
 
     private void buildWin11PanelOverlay(Context ctx, BridgeClient.Status st) {
@@ -2021,6 +2049,7 @@ public class BridgeService extends Service {
         mDockEdgeLp.x = 0;
         mDockEdgeLp.y = 0;
         mDockEdgeTrigger.setVisibility(View.GONE);
+        attachExtImeInsetsWatcher(mDockEdgeTrigger);
     }
 
     private void buildSplitOverlays(Context ctx, BridgeClient.Status st) {
@@ -2273,7 +2302,7 @@ public class BridgeService extends Service {
     }
 
     private void evaluateDockAutoHide(boolean forceDelay) {
-        if (!mDockAutoHide || mIsOnLauncherHome) {
+        if ((!mDockAutoHide && !mExtImeVisible) || mIsOnLauncherHome) {
             mHandler.removeCallbacks(mAutoHideDockTask);
             mAutoHideScheduled = false;
             if (mDockHidden) applyDockHiddenAnimated(false);
@@ -2282,6 +2311,12 @@ public class BridgeService extends Service {
         if (mPanelOpen || mSplitMenuOpen || mTaskBubbleOpen || mDockHovered || mTrayPressed) {
             mHandler.removeCallbacks(mAutoHideDockTask);
             mAutoHideScheduled = false;
+            return;
+        }
+        if (mExtImeVisible && !forceDelay) {
+            mHandler.removeCallbacks(mAutoHideDockTask);
+            mAutoHideScheduled = false;
+            if (!mDockHidden) applyDockHiddenAnimated(true);
             return;
         }
         if (mDockHidden && !forceDelay) return;
@@ -4404,6 +4439,7 @@ public class BridgeService extends Service {
         removeOverlayView(mPanelRoot);
         removeOverlayView(mCursorView);
         mInLauncherHost = false;
+        mExtImeVisible = false;
         mExtWm = null;
         mExtCtx = null;
         mUsingA11yOverlay = false;
