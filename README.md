@@ -80,15 +80,38 @@
 
 ## 🚀 快速上手
 
-1. 安装 `ExtBridge_v3.4.2-lite.apk`，首次打开按引导授予 **通知**、**悬浮窗** 与 **无障碍服务 (`ExtBridge 平板辅助手势`)** 权限。
+1. 安装 APK，首次打开按引导授予 **通知**、**悬浮窗** 与 **无障碍服务 (`ExtBridge 平板辅助手势`)** 权限。
    - **小米 / REDMI**：建议在开发者选项开启「USB 调试（安全设置）」；
    - **OPPO / 一加 / 真我 (ColorOS)**：建议在开发者选项开启「禁止权限监控」；
    - **vivo / iQOO (OriginOS)**：建议在开发者选项开启「USB 模拟点击 / 允许模拟输入」。
-2. 选择 **本机无线调试通知栏填 6 位配对码**、**电脑 ADB 一键命令** 或 **Root 一键降权激活** 拉起守护进程：
-   ```bash
-   adb shell "(pm path com.extbridge.helper | head -n1 | cut -d: -f2; echo assets/extbridge.jar) | xargs unzip -p > /data/local/tmp/extbridge.jar && chmod 644 /data/local/tmp/extbridge.jar && appops set com.extbridge.helper SYSTEM_ALERT_WINDOW allow && appops set com.extbridge.helper RUN_ANY_IN_BACKGROUND allow && appops set com.extbridge.helper 10021 allow 2>/dev/null; appops set com.extbridge.helper ACCESS_RESTRICTED_SETTINGS allow 2>/dev/null; pm grant com.extbridge.helper android.permission.POST_NOTIFICATIONS 2>/dev/null; dumpsys deviceidle whitelist +com.extbridge.helper >/dev/null 2>&1; pkill -f '^app_process.*ExtBridge' 2>/dev/null; sleep 0.2; CLASSPATH=/data/local/tmp/extbridge.jar nohup app_process /data/local/tmp com.extbridge.daemon.ExtBridge >/data/local/tmp/extbridge.log 2>&1 </dev/null &"
-   ```
+2. 选择 **本机无线调试通知栏填 6 位配对码**、**电脑 ADB 一键命令** 或 **Root 一键降权激活** 拉起守护进程。
+   - 电脑方式：先连接设备并允许 USB 调试，再在软件的激活页选择“电脑 ADB”，复制当前生成的命令到电脑终端执行。
+   - 使用软件当前生成的命令，不沿用旧版启动脚本。新版命令会检查部署结果，并通过启动 token、PID 与协议握手确认本次激活。
+   - 配对完成不等于激活完成；以软件显示的验证结果为准。
 3. 插入 Type-C 显示器即可体验 **DeX 独立扩展桌面、自由分屏、一键黑屏省电与纯净原生镜像切换**。
+
+---
+
+## 🏗️ 本地构建
+
+需要 JDK 21+，以及 Android SDK `platforms;android-37.0` 和 `build-tools;37.0.0`。
+设置 `JAVA_HOME` 与 `ANDROID_HOME` 后，在 Windows PowerShell 执行：
+
+```powershell
+.\build_v3.ps1 -Configuration Debug
+```
+
+脚本先构建 daemon JAR，再构建客户端。Debug APK 输出到 `build/out/ExtBridge_Lite-debug.apk`，使用开发测试证书。
+生成 daemon JAR 后，也可以通过 Gradle 构建并安装客户端：
+
+```powershell
+.\gradlew.bat :helper:installDebug
+```
+
+新克隆项目或修改 `bridge/` 后，应先重新运行 `build_v3.ps1`；Gradle 不负责重新编译 daemon。
+默认 Release 构建保留 R8 与资源缩减，配置 `EXTBRIDGE_KEYSTORE`、`EXTBRIDGE_KEYSTORE_PASS` 时签名；
+未配置密钥时输出 `build/out/ExtBridge_Lite-unsigned.apk`，不会自动替换为 Debug 签名。
+现有 GitHub Actions 工作流仍需按新的 JDK、SDK、版本配置位置和输出文件名进行适配。
 
 ---
 
