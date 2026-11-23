@@ -256,7 +256,7 @@ public class LauncherActivity extends Activity {
         top.setPadding(dp(4), 0, dp(4), dp(12));
 
         mTitleView = new TextView(this);
-        mTitleView.setText("ExtBridge 扩展桌面");
+        mTitleView.setText("扩展桌面");
         mTitleView.setTextColor(Color.WHITE);
         mTitleView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 15f);
         mTitleView.getPaint().setFakeBoldText(true);
@@ -534,7 +534,7 @@ public class LauncherActivity extends Activity {
                 || (st.connected && (winW < st.virtW * 0.88f || winH < st.virtH * 0.88f));
 
         if (mTitleView != null) {
-            mTitleView.setText(compact ? "DeX 桌面" : "ExtBridge 扩展桌面");
+            mTitleView.setText(compact ? "DeX 桌面" : "扩展桌面");
             mTitleView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, compact ? 13f : 15f);
         }
         if (mBtnModeTip != null) mBtnModeTip.setVisibility(compact ? View.GONE : View.VISIBLE);

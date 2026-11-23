@@ -30,7 +30,7 @@ public class ControlReceiver extends BroadcastReceiver {
             return;
         }
         if (BridgeService.ACTION_EXIT_ALL.equals(act)) {
-            Toast.makeText(context, "正在停止 ExtBridge 后台服务并退出…", Toast.LENGTH_SHORT).show();
+            Toast.makeText(context, "正在停止后台服务并退出…", Toast.LENGTH_SHORT).show();
             BridgeService.stopAllAndExit(context);
             return;
         }
@@ -64,7 +64,7 @@ public class ControlReceiver extends BroadcastReceiver {
                     int req = copy.getIntExtra("mode", -1);
                     int next = BridgeClient.setMirrorMode(req);
                     BridgeService.refreshFromReceiver(appCtx);
-                    toastAsync(appCtx, next == 1 ? "已切换为【原生镜像模式】" : "已切换为【ExtBridge DeX 扩展模式】");
+                    toastAsync(appCtx, next == 1 ? "已切换为【原生镜像模式】" : "已切换为【DeX 扩展模式】");
                 } else if ("com.extbridge.helper.SPLIT_ACTION".equals(act)) {
                     int splitAct = copy.getIntExtra("action", BridgeClient.SPLIT_TOGGLE_QUICK);
                     int arg = copy.getIntExtra("arg", 0);

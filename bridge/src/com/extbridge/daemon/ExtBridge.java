@@ -76,6 +76,29 @@ import java.util.Locale;
 import java.util.Map;
 
 public class ExtBridge implements Runnable {
+    // BEGIN DAEMON_LIVENESS_PROBE
+    private static final int PROBE_TRANSACTION = 0x455842;
+    private static final int PROBE_MAGIC = 0x45585442;
+    private static final int PROBE_VERSION = 2;
+    private static final int OWNED_SHUTDOWN_TRANSACTION = 0x455843;
+    private static final String PROBE_DESCRIPTOR = "com.extbridge.daemon.ExtBridge";
+    private static String sActivationToken = "";
+    private static int readDaemonEffectiveUid() {
+        // Framework UID caches can retain 0 after a Root-launched process drops to shell.
+        try (BufferedReader reader = new BufferedReader(new FileReader("/proc/self/status"))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.startsWith("Uid:")) {
+                    String[] ids = line.substring(4).trim().split("\\s+");
+                    if (ids.length >= 2) return Integer.parseInt(ids[1]);
+                }
+            }
+        } catch (Throwable error) {
+            System.err.println("Unable to read daemon kernel UID: " + error);
+        }
+        return -1;
+    }
+    // END DAEMON_LIVENESS_PROBE
     private static final String CONF_PATH = "/data/local/tmp/extbridge.conf";
     private static final String APP_CONF_PATH = "/data/local/tmp/extbridge_apps.conf";
     private static final int VD_FLAGS_COMPAT = 0x44CB; // includes ROTATES_WITH_CONTENT (0x0080)
@@ -203,6 +226,20 @@ public class ExtBridge implements Runnable {
     private static float sSavedBrightFloat = -1f;
 
     public static void main(String[] args) {
+        // BEGIN DAEMON_LIVENESS_PROBE
+        if (args.length == 1 && "--verify".equals(args[0])) {
+            System.out.println("EXTBRIDGE_JAR_OK:" + PROBE_VERSION);
+            return;
+        }
+        for (int i = 0; i < args.length; i++) {
+            if ("--activation-token".equals(args[i]) && i + 1 < args.length) {
+                sActivationToken = args[++i];
+                if (!sActivationToken.matches("[a-zA-Z0-9_-]{16,80}")) return;
+            } else if ("--cancel-file".equals(args[i]) && i + 1 < args.length) {
+                if (new File(args[++i]).exists()) return;
+            }
+        }
+        // END DAEMON_LIVENESS_PROBE
         try {
             if (android.os.Process.myUid() == 0) {
                 try {
@@ -2356,11 +2393,43 @@ public class ExtBridge implements Runnable {
     }
 
     private static class BridgeBinder extends Binder {
+        // BEGIN DAEMON_LIVENESS_PROBE
+        BridgeBinder() { attachInterface(null, PROBE_DESCRIPTOR); }
+        // END DAEMON_LIVENESS_PROBE
         @Override
         protected boolean onTransact(int code, Parcel data, Parcel reply, int flags) throws RemoteException {
             if (!isTrustedCaller(Binder.getCallingUid())) {
                 throw new SecurityException("Untrusted ExtBridge caller uid=" + Binder.getCallingUid());
             }
+            // BEGIN DAEMON_LIVENESS_PROBE
+            if (code == PROBE_TRANSACTION) {
+                data.enforceInterface(PROBE_DESCRIPTOR);
+                long nonce = data.readLong();
+                if (data.dataAvail() != 0) throw new IllegalArgumentException("Invalid daemon probe");
+                if (reply != null) {
+                    reply.writeNoException();
+                    reply.writeInt(PROBE_MAGIC);
+                    reply.writeInt(PROBE_VERSION);
+                    reply.writeLong(nonce);
+                    reply.writeInt(android.os.Process.myPid());
+                    reply.writeInt(readDaemonEffectiveUid());
+                    reply.writeString(sActivationToken);
+                }
+                return true;
+            }
+            if (code == OWNED_SHUTDOWN_TRANSACTION) {
+                data.enforceInterface(PROBE_DESCRIPTOR);
+                String token = data.readString();
+                boolean owned = !sActivationToken.isEmpty() && sActivationToken.equals(token);
+                if (reply != null) { reply.writeNoException(); reply.writeInt(owned ? 1 : 0); }
+                if (owned) {
+                    sShuttingDown = true;
+                    cleanupDisplay(true);
+                    new Thread(() -> { SystemClock.sleep(80); System.exit(0); }).start();
+                }
+                return true;
+            }
+            // END DAEMON_LIVENESS_PROBE
             if (code == 10) {
                 sInputToExt = (sInputToExt == 0) ? 1 : 0;
                 syncInput();

@@ -14,31 +14,14 @@ import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
+import java.io.*;
+import java.net.*;
+import java.util.*;
+import java.util.concurrent.*;
 
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.OutputStream;
-import java.net.Inet4Address;
-import java.net.InetAddress;
-import java.net.NetworkInterface;
-import java.util.ArrayDeque;
-import java.util.Enumeration;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
-
-/**
- * Self-contained on-device ADB helper bundling native arm64-v8a adb (libadb.so),
- * NsdManager mDNS discovery for Wireless Debugging pairing/connect endpoints,
- * and RemoteInput notification support for typing the 6-digit pairing code
- * without dismissing Android's pairing popup.
- */
+/** On-device activation. Every entry uses the same owned, cancellable staged flow. */
 public final class AdbBootstrap {
     private static final String TAG = "ExtBridgeAdb";
     public static final String ACTION_PAIR_REPLY = "com.extbridge.helper.ACTION_PAIR_REPLY";
@@ -46,724 +29,358 @@ public final class AdbBootstrap {
     public static final String KEY_PAIR_INPUT = "pair_input";
     private static final String PAIR_CHANNEL_ID = "extbridge_adb_pair";
     private static final int PAIR_NOTIF_ID = 3901;
-    private static final String SERVICE_PAIRING = "_adb-tls-pairing._tcp.";
-    private static final String SERVICE_CONNECT = "_adb-tls-connect._tcp.";
-    private static final String ADB_SERVER_PORT = "15037";
     private static final String PREFS_NAME = "extbridge_prefs";
     private static final String KEY_AUTO_ROOT = "auto_root_enabled";
-
+    private static final String SERVICE_PAIRING = "_adb-tls-pairing._tcp.";
+    private static final String SERVICE_CONNECT = "_adb-tls-connect._tcp.";
     private static final ExecutorService sExec = Executors.newSingleThreadExecutor();
     private static final Handler sMain = new Handler(Looper.getMainLooper());
-
-    public static final class DiscoveryState {
-        public String pairingHost = "";
-        public int pairingPort = 0;
-        public String connectHost = "";
-        public int connectPort = 0;
+    private static final ActivationSession SESSION = new ActivationSession();
+    private static final ThreadLocal<ActivationSession.Ticket> WORKER = new ThreadLocal<>();
+    private static volatile Context sApp;
+    private static volatile String lastOutcome = "NONE", lastStage = "NONE", lastMode = "NONE", lastToken = "";
+    private static volatile int rootExecutions, adbExecutions;
+    public static void diagnostics(android.os.Bundle data) {
+        data.putString("last_outcome", lastOutcome); data.putString("last_stage", lastStage);
+        data.putString("last_mode", lastMode); data.putString("last_request_token", lastToken);
+        data.putInt("root_command_count", rootExecutions); data.putInt("adb_command_count", adbExecutions);
     }
-
-    public interface DiscoveryListener {
-        void onDiscoveryUpdated(DiscoveryState state);
+    public static android.os.Bundle nativeAdbDiagnostics(Context context) {
+        android.os.Bundle data = new android.os.Bundle();
+        ActivationFlow.Command result = runAdb(context, 5000, "version");
+        data.putInt("exit", result.code); data.putString("output", result.output);
+        data.putBoolean("executable", isNativeAdbAvailable(context)); return data;
     }
+    private static volatile long discoveryGeneration;
+    private static NsdManager sNsd;
+    private static NsdManager.DiscoveryListener sPairDisc, sConnDisc;
+    private static WifiManager.MulticastLock sMcastLock;
+    private static DiscoveryListener sDiscListener;
+    private static final DiscoveryState sDiscState = new DiscoveryState();
+    private static final ArrayDeque<ResolveRequest> sResolveQueue = new ArrayDeque<>();
+    private static final Map<String, NsdServiceInfo> sLiveServices = new HashMap<>();
+    private static boolean sResolving;
+    private static String pairingName = "", connectName = "";
+    private static long pairingSeen, connectSeen;
 
+    private AdbBootstrap() {}
+    public interface DiscoveryListener { void onDiscoveryUpdated(DiscoveryState state); }
     public interface ProgressListener {
         void onStep(String message);
         void onResult(boolean success, String message);
+        default void onActivationResult(ActivationFlow.Result result) { onResult(result.activated(), result.message); }
     }
-
-    private static NsdManager sNsd;
-    private static NsdManager.DiscoveryListener sPairDisc;
-    private static NsdManager.DiscoveryListener sConnDisc;
-    private static WifiManager.MulticastLock sMcastLock;
-    private static final DiscoveryState sDiscState = new DiscoveryState();
-    private static final ArrayDeque<NsdServiceInfo> sResolveQueue = new ArrayDeque<>();
-    private static boolean sResolving = false;
-    private static DiscoveryListener sDiscListener;
-
-    private AdbBootstrap() {}
+    public static final class DiscoveryState {
+        public String pairingHost = "", connectHost = "";
+        public int pairingPort, connectPort;
+    }
+    private static final class ResolveRequest {
+        final NsdServiceInfo info; final long generation;
+        ResolveRequest(NsdServiceInfo info, long generation) { this.info = info; this.generation = generation; }
+    }
+    public static void initialize(Context context) { if (context != null) sApp = context.getApplicationContext(); }
+    private static SharedPreferences prefs(Context context) { return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE); }
+    public static boolean isAutoRootEnabled(Context context) { return context != null && prefs(context).getBoolean(KEY_AUTO_ROOT, false); }
+    public static boolean setAutoRootEnabled(Context context, boolean enabled) {
+        initialize(context);
+        boolean previous = isAutoRootEnabled(context);
+        boolean saved = prefs(context).edit().putBoolean(KEY_AUTO_ROOT, enabled).commit();
+        if (!saved) prefs(context).edit().putBoolean(KEY_AUTO_ROOT, previous).commit();
+        if (!enabled) SESSION.cancelAutomatic();
+        return saved;
+    }
+    public static boolean wasCancelled(String token) {
+        Context context = sApp;
+        return context != null && token != null && !token.isEmpty()
+                && prefs(context).getStringSet("cancelled_activations", Collections.emptySet()).contains(token);
+    }
+    public static void cancelActivation(ActivationSession.Ticket ticket) { if (ticket != null) ticket.cancel(); }
+    public static void cancelAllActivations() { SESSION.cancelAll(); }
+    public static void cancelNotificationActivation() { SESSION.cancelNotification(); }
+    private static void invalidateLaunch(Context app, ActivationSession.Ticket ticket, File cancelFile) {
+        synchronized (AdbBootstrap.class) {
+            Set<String> cancelled = new HashSet<>(prefs(app).getStringSet("cancelled_activations", Collections.emptySet()));
+            cancelled.add(ticket.token); prefs(app).edit().putStringSet("cancelled_activations", cancelled).commit();
+        }
+        try { new FileOutputStream(cancelFile).close(); } catch (Throwable error) { Log.w(TAG, "Unable to write cancellation marker", error); }
+    }
 
     public static synchronized DiscoveryState getDiscoveryState() {
         DiscoveryState copy = new DiscoveryState();
-        copy.pairingHost = sDiscState.pairingHost;
-        copy.pairingPort = sDiscState.pairingPort;
-        copy.connectHost = sDiscState.connectHost;
-        copy.connectPort = sDiscState.connectPort;
+        // A live NSD registration stays valid until loss/stop/network change, not an arbitrary one-minute timeout.
+        if (sNsd != null && pairingSeen > 0 && localHost(sDiscState.pairingHost)) { copy.pairingHost = sDiscState.pairingHost; copy.pairingPort = sDiscState.pairingPort; }
+        if (sNsd != null && connectSeen > 0 && localHost(sDiscState.connectHost)) { copy.connectHost = sDiscState.connectHost; copy.connectPort = sDiscState.connectPort; }
         return copy;
     }
-
-    public static synchronized void startDiscovery(Context ctx, DiscoveryListener listener) {
-        sDiscListener = listener;
-        Context appCtx = ctx.getApplicationContext();
-        if (sNsd != null) {
-            notifyDiscListener();
-            return;
-        }
+    public static synchronized void startDiscovery(Context context, DiscoveryListener listener) {
+        initialize(context); if (listener != null || sNsd == null) sDiscListener = listener;
+        if (sNsd != null) { notifyDiscListener(); return; }
+        long generation = ++discoveryGeneration;
+        clearDiscovery();
         try {
-            WifiManager wm = (WifiManager) appCtx.getSystemService(Context.WIFI_SERVICE);
-            if (wm != null && sMcastLock == null) {
-                sMcastLock = wm.createMulticastLock("extbridge_mdns");
-                sMcastLock.setReferenceCounted(false);
-                sMcastLock.acquire();
-            }
-        } catch (Throwable t) {
-            Log.w(TAG, "MulticastLock unavailable", t);
-        }
-
-        try {
-            sNsd = (NsdManager) appCtx.getSystemService(Context.NSD_SERVICE);
+            WifiManager wifi = (WifiManager) sApp.getSystemService(Context.WIFI_SERVICE);
+            if (wifi != null) { sMcastLock = wifi.createMulticastLock("extbridge_mdns"); sMcastLock.setReferenceCounted(false); sMcastLock.acquire(); }
+            sNsd = (NsdManager) sApp.getSystemService(Context.NSD_SERVICE);
             if (sNsd == null) return;
-            sPairDisc = makeDiscoveryListener(true);
-            sConnDisc = makeDiscoveryListener(false);
+            sPairDisc = discovery(true, generation); sConnDisc = discovery(false, generation);
             sNsd.discoverServices(SERVICE_PAIRING, NsdManager.PROTOCOL_DNS_SD, sPairDisc);
             sNsd.discoverServices(SERVICE_CONNECT, NsdManager.PROTOCOL_DNS_SD, sConnDisc);
-        } catch (Throwable t) {
-            Log.e(TAG, "startDiscovery failed", t);
-        }
+        } catch (Throwable error) { Log.w(TAG, "Discovery unavailable", error); stopDiscovery(); }
     }
-
+    private static void clearDiscovery() {
+        sDiscState.pairingHost = ""; sDiscState.connectHost = "";
+        sDiscState.pairingPort = 0; sDiscState.connectPort = 0;
+        pairingName = ""; connectName = ""; pairingSeen = 0; connectSeen = 0;
+        sLiveServices.clear();
+    }
     public static synchronized void stopDiscovery() {
-        sDiscListener = null;
+        ++discoveryGeneration; sDiscListener = null;
         if (sNsd != null) {
             try { if (sPairDisc != null) sNsd.stopServiceDiscovery(sPairDisc); } catch (Throwable ignored) {}
             try { if (sConnDisc != null) sNsd.stopServiceDiscovery(sConnDisc); } catch (Throwable ignored) {}
         }
-        sPairDisc = null;
-        sConnDisc = null;
-        sNsd = null;
-        synchronized (sResolveQueue) {
-            sResolveQueue.clear();
-            sResolving = false;
-        }
-        if (sMcastLock != null) {
-            try { if (sMcastLock.isHeld()) sMcastLock.release(); } catch (Throwable ignored) {}
-            sMcastLock = null;
-        }
+        sPairDisc = null; sConnDisc = null; sNsd = null; sResolveQueue.clear(); sResolving = false; clearDiscovery();
+        if (sMcastLock != null) { try { if (sMcastLock.isHeld()) sMcastLock.release(); } catch (Throwable ignored) {} sMcastLock = null; }
     }
-
-    private static NsdManager.DiscoveryListener makeDiscoveryListener(final boolean isPairing) {
+    private static NsdManager.DiscoveryListener discovery(boolean pairing, long generation) {
         return new NsdManager.DiscoveryListener() {
-            @Override public void onDiscoveryStarted(String regType) {}
-            @Override public void onStartDiscoveryFailed(String serviceType, int errorCode) {}
-            @Override public void onStopDiscoveryFailed(String serviceType, int errorCode) {}
-            @Override public void onDiscoveryStopped(String serviceType) {}
-
-            @Override
-            public void onServiceFound(NsdServiceInfo serviceInfo) {
-                enqueueResolve(serviceInfo);
-            }
-
-            @Override
-            public void onServiceLost(NsdServiceInfo serviceInfo) {
-                synchronized (AdbBootstrap.class) {
-                    if (isPairing) {
-                        sDiscState.pairingPort = 0;
+            public void onDiscoveryStarted(String type) {}
+            public void onStartDiscoveryFailed(String type, int code) {}
+            public void onStopDiscoveryFailed(String type, int code) {}
+            public void onDiscoveryStopped(String type) {}
+            public void onServiceFound(NsdServiceInfo info) { synchronized (AdbBootstrap.class) {
+                if (generation != discoveryGeneration) return;
+                sLiveServices.put(serviceKey(info), info);
+                sResolveQueue.addLast(new ResolveRequest(info, generation)); resolveNext();
+            } }
+            public void onServiceLost(NsdServiceInfo info) { synchronized (AdbBootstrap.class) {
+                if (generation != discoveryGeneration) return;
+                sLiveServices.remove(serviceKey(info));
+                if (pairing && info.getServiceName().equals(pairingName)) { sDiscState.pairingPort = 0; pairingSeen = 0; }
+                if (!pairing && info.getServiceName().equals(connectName)) { sDiscState.connectPort = 0; connectSeen = 0; }
+                notifyDiscListener();
+            } }
+        };
+    }
+    @SuppressWarnings("deprecation")
+    private static void resolveNext() {
+        if (sResolving || sResolveQueue.isEmpty() || sNsd == null) return;
+        ResolveRequest request = sResolveQueue.removeFirst(); sResolving = true;
+        try { sNsd.resolveService(request.info, new NsdManager.ResolveListener() {
+            public void onResolveFailed(NsdServiceInfo info, int code) { synchronized (AdbBootstrap.class) {
+                if (request.generation != discoveryGeneration) return; sResolving = false; resolveNext();
+            } }
+            public void onServiceResolved(NsdServiceInfo info) { synchronized (AdbBootstrap.class) {
+                if (request.generation != discoveryGeneration) return;
+                if (sLiveServices.get(serviceKey(request.info)) != request.info) {
+                    sResolving = false; resolveNext(); return;
+                }
+                String host = info.getHost() == null ? "" : info.getHost().getHostAddress();
+                if (host != null && host.contains("%")) host = host.substring(0, host.indexOf('%'));
+                if (localHost(host) && ActivationFlow.validPort(info.getPort())) {
+                    if (info.getServiceType().contains("pairing")) {
+                        sDiscState.pairingHost = host; sDiscState.pairingPort = info.getPort(); pairingName = info.getServiceName(); pairingSeen = SystemClock.elapsedRealtime();
                     } else {
-                        sDiscState.connectPort = 0;
+                        sDiscState.connectHost = host; sDiscState.connectPort = info.getPort(); connectName = info.getServiceName(); connectSeen = SystemClock.elapsedRealtime();
                     }
                     notifyDiscListener();
                 }
-            }
-        };
+                sResolving = false; resolveNext();
+            } }
+        }); } catch (Throwable error) { sResolving = false; resolveNext(); }
     }
-
-    private static void enqueueResolve(NsdServiceInfo info) {
-        synchronized (sResolveQueue) {
-            sResolveQueue.addLast(info);
-            pumpResolveLocked();
-        }
-    }
-
-    @SuppressWarnings("deprecation")
-    private static void pumpResolveLocked() {
-        if (sResolving || sResolveQueue.isEmpty() || sNsd == null) return;
-        final NsdServiceInfo next = sResolveQueue.pollFirst();
-        if (next == null) return;
-        sResolving = true;
-        try {
-            sNsd.resolveService(next, new NsdManager.ResolveListener() {
-                @Override
-                public void onResolveFailed(NsdServiceInfo serviceInfo, int errorCode) {
-                    synchronized (sResolveQueue) {
-                        sResolving = false;
-                        pumpResolveLocked();
-                    }
-                }
-
-                @Override
-                public void onServiceResolved(NsdServiceInfo resolved) {
-                    handleResolved(resolved);
-                    synchronized (sResolveQueue) {
-                        sResolving = false;
-                        pumpResolveLocked();
-                    }
-                }
-            });
-        } catch (Throwable t) {
-            sResolving = false;
-            pumpResolveLocked();
-        }
-    }
-
-    private static void handleResolved(NsdServiceInfo resolved) {
-        String type = resolved.getServiceType();
-        if (type == null) type = "";
-        InetAddress addr = resolved.getHost();
-        String host = addr != null ? addr.getHostAddress() : "";
-        if (host != null && host.contains("%")) {
-            host = host.substring(0, host.indexOf('%'));
-        }
-        int port = resolved.getPort();
-        if (port <= 0) return;
-
-        synchronized (AdbBootstrap.class) {
-            if (type.contains("pairing")) {
-                sDiscState.pairingHost = host != null ? host : "";
-                sDiscState.pairingPort = port;
-            } else if (type.contains("connect")) {
-                sDiscState.connectHost = host != null ? host : "";
-                sDiscState.connectPort = port;
-            }
-            notifyDiscListener();
-        }
-    }
-
+    private static String serviceKey(NsdServiceInfo info) { return info.getServiceType() + "/" + info.getServiceName(); }
     private static void notifyDiscListener() {
-        final DiscoveryListener l = sDiscListener;
-        if (l == null) return;
-        final DiscoveryState snap = getDiscoveryState();
-        sMain.post(() -> l.onDiscoveryUpdated(snap));
+        DiscoveryListener listener = sDiscListener; long generation = discoveryGeneration;
+        if (listener == null) return;
+        DiscoveryState state = getDiscoveryState();
+        sMain.post(() -> { synchronized (AdbBootstrap.class) {
+            if (generation == discoveryGeneration && listener == sDiscListener) listener.onDiscoveryUpdated(state);
+        } });
     }
-
-    public static String getLocalIpv4() {
-        String best = null;
-        String fallback = null;
+    private static boolean localHost(String host) {
+        if (!ActivationFlow.validHost(host)) return false;
         try {
-            Enumeration<NetworkInterface> ifaces = NetworkInterface.getNetworkInterfaces();
-            while (ifaces != null && ifaces.hasMoreElements()) {
-                NetworkInterface nif = ifaces.nextElement();
-                if (!nif.isUp() || nif.isLoopback()) continue;
-                String name = nif.getName() == null ? "" : nif.getName().toLowerCase();
-                if (name.startsWith("tun") || name.startsWith("utun") || name.startsWith("ppp")
-                        || name.startsWith("dummy")) continue;
-                Enumeration<InetAddress> addrs = nif.getInetAddresses();
-                while (addrs.hasMoreElements()) {
-                    InetAddress a = addrs.nextElement();
-                    if (a instanceof Inet4Address && !a.isLoopbackAddress()) {
-                        String ip = a.getHostAddress();
-                        if (name.startsWith("wlan") || name.startsWith("ap") || name.startsWith("eth")) {
-                            return ip;
-                        }
-                        if (!name.startsWith("rmnet") && !name.startsWith("ccmni")) {
-                            if (best == null) best = ip;
-                        } else if (fallback == null) {
-                            fallback = ip;
-                        }
+            InetAddress address = InetAddress.getByName(host);
+            if (address.isLoopbackAddress()) return true;
+            Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
+            while (interfaces.hasMoreElements()) {
+                Enumeration<InetAddress> addresses = interfaces.nextElement().getInetAddresses();
+                while (addresses.hasMoreElements()) if (address.equals(addresses.nextElement())) return true;
+            }
+        } catch (Throwable ignored) {}
+        return false;
+    }
+    public static String getLocalIpv4() {
+        String fallback = "127.0.0.1";
+        try {
+            Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
+            while (interfaces.hasMoreElements()) {
+                NetworkInterface network = interfaces.nextElement();
+                if (!network.isUp() || network.isLoopback()) continue;
+                String name = network.getName().toLowerCase(Locale.ROOT);
+                if (name.startsWith("tun") || name.startsWith("ppp")) continue;
+                Enumeration<InetAddress> addresses = network.getInetAddresses();
+                while (addresses.hasMoreElements()) {
+                    InetAddress address = addresses.nextElement();
+                    if (address instanceof Inet4Address && !address.isLoopbackAddress()) {
+                        if (name.startsWith("wlan") || name.startsWith("eth")) return address.getHostAddress();
+                        fallback = address.getHostAddress();
                     }
                 }
             }
         } catch (Throwable ignored) {}
-        if (best != null) return best;
-        if (fallback != null) return fallback;
-        return "127.0.0.1";
+        return fallback;
     }
-
-    public static String buildPcAdbCommand() {
-        return "adb shell \"(pm path com.extbridge.helper | head -n1 | cut -d: -f2; echo assets/extbridge.jar) | xargs unzip -p > /data/local/tmp/extbridge.jar && chmod 644 /data/local/tmp/extbridge.jar && appops set com.extbridge.helper SYSTEM_ALERT_WINDOW allow && appops set com.extbridge.helper RUN_ANY_IN_BACKGROUND allow && appops set com.extbridge.helper 10021 allow 2>/dev/null; appops set com.extbridge.helper ACCESS_RESTRICTED_SETTINGS allow 2>/dev/null; pm grant com.extbridge.helper android.permission.POST_NOTIFICATIONS 2>/dev/null; dumpsys deviceidle whitelist +com.extbridge.helper >/dev/null 2>&1; am broadcast -a com.extbridge.daemon.SHUTDOWN -p com.android.shell 2>/dev/null; am broadcast -a com.extbridge.daemon.SHUTDOWN 2>/dev/null; sleep 0.6; pkill -f '^app_process.*ExtBridge' 2>/dev/null; sleep 0.3; CLASSPATH=/data/local/tmp/extbridge.jar nohup app_process /data/local/tmp com.extbridge.daemon.ExtBridge >/data/local/tmp/extbridge.log 2>&1 </dev/null &\"";
-    }
-
-    public static boolean isNativeAdbAvailable(Context ctx) {
-        File f = getAdbFile(ctx);
-        return f.exists() && f.canExecute();
-    }
-
-    private static File getAdbFile(Context ctx) {
-        return new File(ctx.getApplicationInfo().nativeLibraryDir, "libadb.so");
-    }
-
-    public static void pairAndBootstrapAsync(
-            final Context ctx,
-            final String pairHost,
-            final int pairPort,
-            final String pairCode,
-            final String connectHost,
-            final int connectPort,
-            final ProgressListener listener) {
-        final Context appCtx = ctx.getApplicationContext();
-        sExec.execute(() -> {
-            try {
-                pairAndBootstrapSync(appCtx, pairHost, pairPort, pairCode, connectHost, connectPort, listener);
-            } catch (Throwable t) {
-                Log.e(TAG, "pairAndBootstrap failed", t);
-                postResult(listener, false, "执行异常: " + t.getMessage());
-            }
-        });
-    }
-
-    public static void connectAndBootstrapAsync(
-            final Context ctx,
-            final String connectHost,
-            final int connectPort,
-            final ProgressListener listener) {
-        final Context appCtx = ctx.getApplicationContext();
-        sExec.execute(() -> {
-            try {
-                connectAndBootstrapSync(appCtx, connectHost, connectPort, listener);
-            } catch (Throwable t) {
-                Log.e(TAG, "connectAndBootstrap failed", t);
-                postResult(listener, false, "执行异常: " + t.getMessage());
-            }
-        });
-    }
-
-    public static void pairFromNotificationAsync(
-            final Context ctx,
-            final String rawInput,
-            final ProgressListener listener) {
-        final Context appCtx = ctx.getApplicationContext();
-        sExec.execute(() -> {
-            DiscoveryState ds = getDiscoveryState();
-            String cleaned = rawInput == null ? "" : rawInput.trim().replace('：', ':');
-            String code = "";
-            String host = !ds.pairingHost.isEmpty() ? ds.pairingHost : getLocalIpv4();
-            int pairPort = ds.pairingPort;
-
-            String[] parts = cleaned.split("[\\s:]+");
-            if (parts.length == 1) {
-                code = parts[0];
-            } else if (parts.length == 2) {
-                // Either "CODE PORT" or "PORT CODE"
-                if (parts[0].length() == 6 && parts[1].length() != 6) {
-                    code = parts[0];
-                    pairPort = parseIntSafe(parts[1], pairPort);
-                } else {
-                    pairPort = parseIntSafe(parts[0], pairPort);
-                    code = parts[1];
-                }
-            } else if (parts.length >= 3) {
-                host = parts[0];
-                pairPort = parseIntSafe(parts[1], pairPort);
-                code = parts[2];
-            }
-
-            if (code.isEmpty()) {
-                postResult(listener, false, "请输入 6 位配对码");
-                return;
-            }
-            if (pairPort <= 0) {
-                postResult(listener, false, "未自动发现配对端口，请按「配对码:端口」输入（例如 551857:36565）");
-                return;
-            }
-            pairAndBootstrapSync(appCtx, host, pairPort, code, ds.connectHost, ds.connectPort, listener);
-        });
-    }
-
-    private static void pairAndBootstrapSync(
-            Context appCtx,
-            String pairHost,
-            int pairPort,
-            String pairCode,
-            String connectHost,
-            int connectPort,
-            ProgressListener listener) {
-        if (!isNativeAdbAvailable(appCtx)) {
-            postResult(listener, false, "内置 ADB 模块 (libadb.so) 不可用");
-            return;
-        }
-        String pHost = (pairHost == null || pairHost.trim().isEmpty()) ? getLocalIpv4() : pairHost.trim();
-        String code = pairCode == null ? "" : pairCode.trim();
-        if (pairPort <= 0 || code.isEmpty()) {
-            postResult(listener, false, "请填写完整的配对端口和 6 位配对码");
-            return;
-        }
-
-        postStep(listener, "正在启动内置 ADB 服务...");
-        CmdRes startRes = runAdb(appCtx, 10000, "start-server");
-        if (startRes.code != 0) {
-            postResult(listener, false, "ADB 服务启动失败:\n" + startRes.output);
-            return;
-        }
-
-        String pairTarget = pHost + ":" + pairPort;
-        postStep(listener, "正在与 " + pairTarget + " 配对...");
-        CmdRes pairRes = runAdb(appCtx, 15000, "pair", pairTarget, code);
-        String pOut = pairRes.output == null ? "" : pairRes.output.trim();
-        boolean pairOk = pairRes.code == 0 && !pOut.toLowerCase().contains("failed") && !pOut.toLowerCase().contains("error");
-        if (!pairOk) {
-            postResult(listener, false, "配对失败 (" + pairTarget + "):\n" + pOut
-                    + "\n提示：请确保没有关闭系统的「与设备配对」弹窗导致配对码刷新。");
-            return;
-        }
-
-        postStep(listener, "配对成功！正在等待无线调试连接端口...");
-        String cHost = (connectHost != null && !connectHost.trim().isEmpty()) ? connectHost.trim() : pHost;
-        int cPort = connectPort;
-        if (cPort <= 0) {
-            long deadline = System.currentTimeMillis() + 4500;
-            while (System.currentTimeMillis() < deadline) {
-                DiscoveryState ds = getDiscoveryState();
-                if (ds.connectPort > 0) {
-                    cPort = ds.connectPort;
-                    if (!ds.connectHost.isEmpty()) cHost = ds.connectHost;
-                    break;
-                }
-                try { Thread.sleep(250); } catch (InterruptedException ignored) { break; }
-            }
-        }
-        if (cPort <= 0) {
-            postResult(listener, true, "已成功完成设备配对！请关闭系统的配对弹窗，输入无线调试主界面显示的连接端口后点击「直接连接并启动」。");
-            return;
-        }
-        connectAndBootstrapSync(appCtx, cHost, cPort, listener);
-    }
-
-    private static void connectAndBootstrapSync(
-            Context appCtx,
-            String connectHost,
-            int connectPort,
-            ProgressListener listener) {
-        if (!isNativeAdbAvailable(appCtx)) {
-            postResult(listener, false, "内置 ADB 模块 (libadb.so) 不可用");
-            return;
-        }
-        String host = (connectHost == null || connectHost.trim().isEmpty()) ? getLocalIpv4() : connectHost.trim();
-        if (connectPort <= 0) {
-            postResult(listener, false, "请填写无线调试主页显示的端口号");
-            return;
-        }
-        String target = host + ":" + connectPort;
-
-        postStep(listener, "正在连接无线调试 " + target + "...");
-        runAdb(appCtx, 8000, "start-server");
-        CmdRes connRes = runAdb(appCtx, 12000, "connect", target);
-        String cOut = connRes.output == null ? "" : connRes.output.trim();
-        String cLow = cOut.toLowerCase();
-        boolean connOk = (cLow.contains("connected to") || cLow.contains("already connected"))
-                && !cLow.contains("failed") && !cLow.contains("cannot connect") && !cLow.contains("unable to connect");
-        if (!connOk && !"127.0.0.1".equals(host)) {
-            String fbTarget = "127.0.0.1:" + connectPort;
-            CmdRes fbRes = runAdb(appCtx, 10000, "connect", fbTarget);
-            String fbOut = fbRes.output == null ? "" : fbRes.output.trim();
-            String fbLow = fbOut.toLowerCase();
-            boolean fbOk = (fbLow.contains("connected to") || fbLow.contains("already connected"))
-                    && !fbLow.contains("failed") && !fbLow.contains("cannot connect") && !fbLow.contains("unable to connect");
-            if (fbOk) {
-                target = fbTarget;
-                connOk = true;
-            }
-        }
-        if (!connOk) {
-            postResult(listener, false, "连接无线调试失败 (" + target + "):\n" + cOut
-                    + "\n若为新设备，请先用「配对码」完成配对并确认连接端口已更新。");
-            return;
-        }
-
-        postStep(listener, "已连接！正在释放 extbridge.jar 并授权启动守护进程...");
-        String bootstrapCmd = buildDaemonBootstrapScript(null);
-
-        CmdRes shRes = runAdb(appCtx, 18000, "-s", target, "shell", bootstrapCmd);
-        if (shRes.code != 0 || shRes.output == null || !shRes.output.contains("LAUNCH_DONE")) {
-            postResult(listener, false, "远程 Shell 启动失败:\n" + shRes.output);
-            return;
-        }
-
-        awaitDaemonBinderReady(appCtx, listener, "无线调试激活成功，ExtBridge 服务已就绪！");
-    }
-
-    public static boolean isAutoRootEnabled(Context ctx) {
-        if (ctx == null) return false;
-        SharedPreferences sp = ctx.getApplicationContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        return sp.getBoolean(KEY_AUTO_ROOT, false);
-    }
-
-    public static void setAutoRootEnabled(Context ctx, boolean enabled) {
-        if (ctx == null) return;
-        SharedPreferences sp = ctx.getApplicationContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        sp.edit().putBoolean(KEY_AUTO_ROOT, enabled).apply();
-    }
-
+    public static String buildPcAdbCommand() { return DaemonLaunchScript.pcCommand(); }
+    private static File getAdbFile(Context context) { return new File(context.getApplicationInfo().nativeLibraryDir, "libadb.so"); }
+    public static boolean isNativeAdbAvailable(Context context) { File file = getAdbFile(context); return file.isFile() && file.canExecute(); }
     public static boolean hasSuBinaryHint() {
-        String[] paths = {
-                "/system/bin/su", "/system/xbin/su", "/sbin/su",
-                "/vendor/bin/su", "/debug_ramdisk/su",
-                "/data/adb/ksu/bin/su", "/data/adb/ap/bin/su"
-        };
-        for (String p : paths) {
-            try {
-                File f = new File(p);
-                if (f.exists()) return true;
-            } catch (Throwable ignored) {}
-        }
-        String envPath = System.getenv("PATH");
-        if (envPath != null) {
-            for (String dir : envPath.split(":")) {
-                if (dir == null || dir.isEmpty()) continue;
-                try {
-                    if (new File(dir, "su").exists()) return true;
-                } catch (Throwable ignored) {}
-            }
-        }
+        for (String path : new String[]{"/system/bin/su", "/system/xbin/su", "/sbin/su", "/vendor/bin/su", "/debug_ramdisk/su"}) if (new File(path).exists()) return true;
         return false;
     }
-
-    public static void rootBootstrapAsync(final Context ctx, final boolean markAutoRoot, final ProgressListener listener) {
-        final Context appCtx = ctx.getApplicationContext();
+    public static ActivationSession.Ticket rootBootstrapAsync(Context context, boolean ignoredMarkAutoRoot, ProgressListener listener) {
+        return submit(context, new ActivationFlow.Request(ActivationSession.Mode.ROOT, "", 0, "", 0), listener);
+    }
+    public static ActivationSession.Ticket autoRootBootstrapAsync(Context context, ProgressListener listener) {
+        return submit(context, new ActivationFlow.Request(ActivationSession.Mode.AUTO_ROOT, "", 0, "", 0), listener);
+    }
+    public static ActivationSession.Ticket pairAndBootstrapAsync(Context context, String host, int pairPort, String code, String connectHost, int connectPort, ProgressListener listener) {
+        return submit(context, new ActivationFlow.Request(ActivationSession.Mode.PAIR, host == null || host.trim().isEmpty() ? getLocalIpv4() : host, pairPort, code, connectPort), listener);
+    }
+    public static ActivationSession.Ticket connectAndBootstrapAsync(Context context, String host, int port, ProgressListener listener) {
+        return submit(context, new ActivationFlow.Request(ActivationSession.Mode.CONNECT, host == null || host.trim().isEmpty() ? getLocalIpv4() : host, 0, "", port), listener);
+    }
+    public static ActivationSession.Ticket pairFromNotificationAsync(Context context, String raw, ProgressListener listener) {
+        DiscoveryState state = getDiscoveryState();
+        ActivationFlow.Request request = ActivationFlow.notification(raw,
+                state.pairingHost.isEmpty() ? getLocalIpv4() : state.pairingHost, state.pairingPort, state.connectPort);
+        return submit(context, request, listener);
+    }
+    private static ActivationSession.Ticket submit(Context context, ActivationFlow.Request request, ProgressListener listener) {
+        initialize(context);
+        ActivationSession.Ticket ticket = SESSION.begin(request.mode);
+        if (ticket == null) { if (listener != null) sMain.post(() -> listener.onActivationResult(ActivationFlow.busy())); return null; }
+        Context app = context.getApplicationContext();
+        File cancelFile = new File(app.getFilesDir(), "activation-cancel-" + ticket.token);
+        ticket.onCancel(() -> invalidateLaunch(app, ticket, cancelFile));
         sExec.execute(() -> {
-            postStep(listener, "正在请求 Root (su) 权限...");
-            String stagedJar = stageBridgeJar(appCtx);
-            String script = "UID_NOW=$(id -u 2>/dev/null || echo -1); "
-                    + "if [ \"$UID_NOW\" != \"0\" ]; then echo NO_ROOT:$UID_NOW; exit 12; fi; "
-                    + buildDaemonBootstrapScript(stagedJar);
-
-            CmdRes res = runSu(18000, script);
-            String out = res.output == null ? "" : res.output.trim();
-            if (res.code != 0 || !out.contains("LAUNCH_DONE")) {
-                String hint = out.contains("NO_ROOT")
-                        ? "未获取到 Root 权限（请在 Magisk / KernelSU / APatch 弹窗中允许授权，或改用无线调试/ADB激活）。"
-                        : ("Root 执行失败（设备可能未 Root 或未对 ExtBridge 授权 Root）：\n" + out);
-                postResult(listener, false, hint);
-                return;
-            }
-
-            if (markAutoRoot) {
-                setAutoRootEnabled(appCtx, true);
-            }
-            awaitDaemonBinderReady(appCtx, listener, "Root 一键激活成功，ExtBridge 服务已就绪！");
+            WORKER.set(ticket);
+            lastOutcome = "RUNNING"; lastStage = "VALIDATE"; lastMode = request.mode.name(); lastToken = ticket.token;
+            ActivationFlow.Result result = ActivationFlow.run(request, ticket.token, new ActivationFlow.Environment() {
+                public boolean cancelled() { return ticket.isCancelled() || BridgeService.sUserStopping || request.mode == ActivationSession.Mode.AUTO_ROOT && !isAutoRootEnabled(app); }
+                public boolean adbAvailable() { return isNativeAdbAvailable(app); }
+                public boolean hostAllowed(String host) { return localHost(host); }
+                public ActivationFlow.Command adb(String... args) { return runAdb(app, 18000, args); }
+                public ActivationFlow.Command root(String script) { return runSu(18000, script); }
+                public String script(String token, boolean root) { return DaemonLaunchScript.build(token, root ? stageBridgeJar(app, token) : null, root ? cancelFile.getAbsolutePath() : null, root); }
+                public int discoverConnectPort() { return getDiscoveryState().connectPort; }
+                public ActivationFlow.Probe probe() {
+                    BridgeClient.requestBinder(app); BridgeClient.Status status = BridgeClient.getStatus();
+                    return new ActivationFlow.Probe(status.connected, status.handshakeVerified, status.protocolCompatible,
+                            status.daemonPid, status.daemonUid, status.activationToken, status.connectionIssue);
+                }
+                public long now() { return SystemClock.elapsedRealtime(); }
+                public void pause(long time) { try { Thread.sleep(time); } catch (InterruptedException error) { ticket.cancel(); Thread.currentThread().interrupt(); } }
+                public void step(ActivationFlow.Stage stage, String message) { if (ticket.mayDeliver()) lastStage = stage.name(); if (listener != null) sMain.post(() -> { if (ticket.mayDeliver()) listener.onStep(message); }); }
+            });
+            if (result.outcome == ActivationFlow.Outcome.CANCELLED) ticket.cancel();
+            boolean rejectedLaunch = result.outcome == ActivationFlow.Outcome.FAILED
+                    && (result.stage == ActivationFlow.Stage.DEPLOY || result.stage == ActivationFlow.Stage.VERIFY);
+            if (rejectedLaunch) invalidateLaunch(app, ticket, cancelFile);
+            // A failed/abandoned launch may arrive after the local adb/su process
+            // returned. Revoke only this token, never an unrelated existing daemon.
+            if (ticket.isCancelled() || rejectedLaunch) BridgeClient.shutdownOwned(ticket.token);
+            if (ticket.sameGeneration()) { lastOutcome = result.outcome.name(); lastStage = result.stage.name(); }
+            ticket.finish(); WORKER.remove();
+            if (!ticket.isCancelled() && !rejectedLaunch) { cancelFile.delete(); new File(app.getFilesDir(), "extbridge-stage-" + ticket.token + ".jar").delete(); }
+            if (listener != null) sMain.post(() -> { if (ticket.mayDeliver()) listener.onActivationResult(result); });
         });
+        return ticket;
     }
-
-    private static String stageBridgeJar(Context ctx) {
-        File outFile = new File(ctx.getFilesDir(), "extbridge_stage.jar");
-        try (InputStream in = ctx.getAssets().open("extbridge.jar");
-             OutputStream out = new FileOutputStream(outFile, false)) {
-            byte[] buf = new byte[8192];
-            int n;
-            while ((n = in.read(buf)) > 0) {
-                out.write(buf, 0, n);
-            }
-            out.flush();
-            outFile.setReadable(true, false);
-            return outFile.getAbsolutePath();
-        } catch (Throwable t) {
-            Log.w(TAG, "stageBridgeJar fallback to APK unzip", t);
-            return null;
-        }
+    private static String stageBridgeJar(Context context, String token) {
+        File file = new File(context.getFilesDir(), "extbridge-stage-" + token + ".jar");
+        try (InputStream in = context.getAssets().open("extbridge.jar"); OutputStream out = new FileOutputStream(file)) {
+            byte[] buffer = new byte[8192]; int count;
+            while ((count = in.read(buffer)) > 0) out.write(buffer, 0, count);
+            return file.getAbsolutePath();
+        } catch (IOException error) { throw new IllegalStateException("Unable to stage daemon", error); }
     }
-
-    private static String buildDaemonBootstrapScript(String stagedJarPath) {
-        String jarExtract;
-        if (stagedJarPath != null && !stagedJarPath.isEmpty()) {
-            String qStage = stagedJarPath.replace("'", "");
-            jarExtract = "if [ -s '" + qStage + "' ]; then cp '" + qStage + "' /data/local/tmp/extbridge.jar; "
-                    + "else APK=$(pm path com.extbridge.helper | head -n1 | cut -d: -f2); unzip -p \"$APK\" assets/extbridge.jar > /data/local/tmp/extbridge.jar; fi && ";
-        } else {
-            jarExtract = "APK=$(pm path com.extbridge.helper | head -n1 | cut -d: -f2); "
-                    + "unzip -p \"$APK\" assets/extbridge.jar > /data/local/tmp/extbridge.jar && ";
-        }
-        return jarExtract
-                + "chmod 644 /data/local/tmp/extbridge.jar && "
-                + "chown 2000:2000 /data/local/tmp/extbridge.jar /data/local/tmp/extbridge.conf /data/local/tmp/extbridge_apps.conf /data/local/tmp/extbridge_healed_v2 /data/local/tmp/extbridge.log 2>/dev/null; "
-                + "appops set com.extbridge.helper SYSTEM_ALERT_WINDOW allow 2>/dev/null; "
-                + "appops set com.extbridge.helper POST_NOTIFICATION allow 2>/dev/null; "
-                + "appops set com.extbridge.helper RUN_ANY_IN_BACKGROUND allow 2>/dev/null; "
-                + "appops set com.extbridge.helper 10021 allow 2>/dev/null; "
-                + "appops set com.extbridge.helper ACCESS_RESTRICTED_SETTINGS allow 2>/dev/null; "
-                + "pm grant com.extbridge.helper android.permission.POST_NOTIFICATIONS 2>/dev/null; "
-                + "dumpsys deviceidle whitelist +com.extbridge.helper >/dev/null 2>&1; "
-                + "am broadcast -a com.extbridge.daemon.SHUTDOWN -p com.android.shell 2>/dev/null; "
-                + "am broadcast -a com.extbridge.daemon.SHUTDOWN 2>/dev/null; "
-                + "sleep 0.6; "
-                + "pkill -f '^app_process.*ExtBridge' 2>/dev/null; "
-                + "sleep 0.3; "
-                + "(CLASSPATH=/data/local/tmp/extbridge.jar nohup app_process /data/local/tmp com.extbridge.daemon.ExtBridge </dev/null >/data/local/tmp/extbridge.log 2>&1 &); "
-                + "sleep 0.6; echo LAUNCH_DONE";
+    private static ActivationFlow.Command runSu(long timeout, String script) {
+        return command(new ProcessBuilder("su", "-c", script), timeout);
     }
-
-    private static void awaitDaemonBinderReady(Context appCtx, ProgressListener listener, String successMsg) {
-        postStep(listener, "守护进程已拉起，正在验证 Binder 连接...");
-        long deadline = System.currentTimeMillis() + 7000;
-        while (System.currentTimeMillis() < deadline) {
-            BridgeClient.requestBinder(appCtx);
-            if (BridgeClient.getStatus().connected) {
-                cancelPairingNotification(appCtx);
-                postResult(listener, true, successMsg);
-                return;
-            }
-            try { Thread.sleep(350); } catch (InterruptedException ignored) { break; }
-        }
-        postResult(listener, false, "守护进程命令已下发，但暂未收到 Binder 握手，请稍等几秒或查看 /data/local/tmp/extbridge.log");
+    private static ActivationFlow.Command runAdb(Context context, long timeout, String... args) {
+        File home = new File(context.getFilesDir(), "adb_home"), androidHome = new File(home, ".android"), tmp = new File(context.getCacheDir(), "adb_tmp");
+        androidHome.mkdirs(); tmp.mkdirs();
+        String[] command = new String[args.length + 1]; command[0] = getAdbFile(context).getAbsolutePath(); System.arraycopy(args, 0, command, 1, args.length);
+        ProcessBuilder builder = new ProcessBuilder(command).directory(home);
+        builder.environment().put("HOME", home.getAbsolutePath()); builder.environment().put("ANDROID_USER_HOME", androidHome.getAbsolutePath());
+        builder.environment().put("TMPDIR", tmp.getAbsolutePath()); builder.environment().put("ANDROID_ADB_SERVER_PORT", "15037");
+        builder.environment().put("ADB_MDNS", "0"); builder.environment().put("ADB_MDNS_OPENSCREEN", "0");
+        return command(builder, timeout);
     }
-
-    private static CmdRes runSu(long timeoutMs, String shellCmd) {
-        Process p = null;
+    private static ActivationFlow.Command command(ProcessBuilder builder, long timeout) {
+        ActivationSession.Ticket ticket = WORKER.get();
+        if (ticket != null && (ticket.isCancelled() || ticket.mode == ActivationSession.Mode.AUTO_ROOT && !isAutoRootEnabled(sApp))) return new ActivationFlow.Command(125, "CANCELLED");
+        Process process = null;
         try {
-            p = new ProcessBuilder("su", "-c", shellCmd).redirectErrorStream(true).start();
-            try {
-                p.getOutputStream().close();
-            } catch (Throwable ignored) {}
-            final StringBuilder sb = new StringBuilder();
-            final Process proc = p;
-            Thread reader = new Thread(() -> {
-                try (BufferedReader br = new BufferedReader(new InputStreamReader(proc.getInputStream()))) {
-                    String line;
-                    while ((line = br.readLine()) != null) {
-                        if (sb.length() < 8192) {
-                            if (sb.length() > 0) sb.append('\n');
-                            sb.append(line);
-                        }
-                    }
-                } catch (Throwable ignored) {}
-            });
-            reader.start();
-
-            boolean finished = p.waitFor(timeoutMs, TimeUnit.MILLISECONDS);
-            if (!finished) {
-                p.destroyForcibly();
-                reader.join(500);
-                return new CmdRes(-1, "Root 命令执行超时 (" + timeoutMs + "ms)\n" + sb);
+            if (builder.command().get(0).equals("su")) ++rootExecutions; else ++adbExecutions;
+            process = builder.redirectErrorStream(true).start();
+            final Process running = process;
+            if (ticket != null) ticket.attachProcess(() -> running.destroy());
+            process.getOutputStream().close();
+            StringBuilder output = new StringBuilder();
+            Thread reader = new Thread(() -> { try (BufferedReader input = new BufferedReader(new InputStreamReader(running.getInputStream()))) {
+                String line; while ((line = input.readLine()) != null) synchronized (output) { if (output.length() < 8192) output.append(line).append('\n'); }
+            } catch (IOException ignored) {} });
+            reader.setDaemon(true); reader.start();
+            long deadline = SystemClock.elapsedRealtime() + timeout;
+            boolean exited = false;
+            while (!exited && SystemClock.elapsedRealtime() < deadline) {
+                if (ticket != null && (ticket.isCancelled() || ticket.mode == ActivationSession.Mode.AUTO_ROOT && !isAutoRootEnabled(sApp))) {
+                    ticket.cancel(); try { process.destroy(); } catch (Throwable ignored) {}
+                    reader.join(200); return new ActivationFlow.Command(125, "CANCELLED");
+                }
+                exited = process.waitFor(100, TimeUnit.MILLISECONDS);
             }
+            if (!exited) process.destroyForcibly();
             reader.join(1000);
-            return new CmdRes(p.exitValue(), sb.toString());
-        } catch (Throwable t) {
-            if (p != null) try { p.destroyForcibly(); } catch (Throwable ignored) {}
-            return new CmdRes(-1, "未找到 su 或无 Root 权限: " + t.getMessage());
-        }
-    }
-
-    private static final class CmdRes {
-        final int code;
-        final String output;
-        CmdRes(int code, String output) {
-            this.code = code;
-            this.output = output;
-        }
-    }
-
-    private static CmdRes runAdb(Context ctx, long timeoutMs, String... args) {
-        Process p = null;
-        try {
-            File adbBin = getAdbFile(ctx);
-            File homeDir = new File(ctx.getFilesDir(), "adb_home");
-            File dotAndroid = new File(homeDir, ".android");
-            File tmpDir = new File(ctx.getCacheDir(), "adb_tmp");
-            if (!dotAndroid.exists()) dotAndroid.mkdirs();
-            if (!tmpDir.exists()) tmpDir.mkdirs();
-
-            String[] cmd = new String[args.length + 1];
-            cmd[0] = adbBin.getAbsolutePath();
-            System.arraycopy(args, 0, cmd, 1, args.length);
-
-            ProcessBuilder pb = new ProcessBuilder(cmd);
-            pb.directory(homeDir);
-            pb.redirectErrorStream(true);
-            Map<String, String> env = new HashMap<>(pb.environment());
-            env.put("HOME", homeDir.getAbsolutePath());
-            env.put("ANDROID_USER_HOME", dotAndroid.getAbsolutePath());
-            env.put("ANDROID_SDK_HOME", homeDir.getAbsolutePath());
-            env.put("TMPDIR", tmpDir.getAbsolutePath());
-            env.put("ANDROID_ADB_SERVER_PORT", ADB_SERVER_PORT);
-            env.put("ADB_MDNS", "0");
-            env.put("ADB_MDNS_OPENSCREEN", "0");
-            pb.environment().clear();
-            pb.environment().putAll(env);
-
-            p = pb.start();
-            try {
-                p.getOutputStream().close();
-            } catch (Throwable ignored) {}
-            final StringBuilder sb = new StringBuilder();
-            final Process proc = p;
-            Thread reader = new Thread(() -> {
-                try (BufferedReader br = new BufferedReader(new InputStreamReader(proc.getInputStream()))) {
-                    String line;
-                    while ((line = br.readLine()) != null) {
-                        if (sb.length() < 8192) {
-                            if (sb.length() > 0) sb.append('\n');
-                            sb.append(line);
-                        }
-                    }
-                } catch (Throwable ignored) {}
-            });
-            reader.start();
-
-            boolean finished = p.waitFor(timeoutMs, TimeUnit.MILLISECONDS);
-            if (!finished) {
-                p.destroyForcibly();
-                reader.join(500);
-                return new CmdRes(-1, "命令执行超时 (" + timeoutMs + "ms)\n" + sb);
+            synchronized (output) {
+                int code = exited ? process.exitValue() : -3;
+                if (code != 0) Log.w(TAG, "Activation command failed: " + builder.command().get(0) + " code=" + code
+                        + " output=" + output.toString().replaceAll("[0-9]{6}", "<redacted>"));
+                return new ActivationFlow.Command(code, output.toString());
             }
-            reader.join(1000);
-            return new CmdRes(p.exitValue(), sb.toString());
-        } catch (Throwable t) {
-            if (p != null) try { p.destroyForcibly(); } catch (Throwable ignored) {}
-            return new CmdRes(-1, "执行出错: " + t.getMessage());
+        } catch (Throwable error) {
+            if (process != null) try { process.destroy(); } catch (Throwable ignored) {}
+            Log.w(TAG, "Activation executable failed", error);
+            return new ActivationFlow.Command(-2, error.getClass().getSimpleName());
         }
+        finally { if (ticket != null) ticket.detachProcess(); }
     }
-
-    public static void showPairingNotification(Context ctx, String statusText) {
-        NotificationManager nm = (NotificationManager) ctx.getSystemService(Context.NOTIFICATION_SERVICE);
-        if (nm == null) return;
-        if (Build.VERSION.SDK_INT >= 26) {
-            NotificationChannel ch = new NotificationChannel(
-                    PAIR_CHANNEL_ID, "无线调试快速配对", NotificationManager.IMPORTANCE_HIGH);
-            ch.setDescription("在系统配对码弹窗上方直接输入6位配对码完成激活");
-            nm.createNotificationChannel(ch);
-        }
-
-        RemoteInput remoteInput = new RemoteInput.Builder(KEY_PAIR_INPUT)
-                .setLabel("输入6位配对码（或 配对码:端口）")
-                .build();
-        Intent replyIntent = new Intent(ctx, AdbPairingReceiver.class);
-        replyIntent.setAction(ACTION_PAIR_REPLY);
-        int mutFlag = Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_MUTABLE : 0;
-        PendingIntent replyPi = PendingIntent.getBroadcast(
-                ctx, 2001, replyIntent, PendingIntent.FLAG_UPDATE_CURRENT | mutFlag);
-        Notification.Action replyAction = new Notification.Action.Builder(
-                android.R.drawable.ic_menu_send, "输入配对码", replyPi)
-                .addRemoteInput(remoteInput)
-                .build();
-
-        Intent openIntent = new Intent(ctx, MainActivity.class);
-        openIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        PendingIntent openPi = PendingIntent.getActivity(
-                ctx, 2002, openIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-
-        DiscoveryState ds = getDiscoveryState();
-        String body = statusText;
-        if (body == null || body.isEmpty()) {
-            body = ds.pairingPort > 0
-                    ? ("已发现配对端口 " + ds.pairingPort + "，下拉后点「输入配对码」填6位数字即可")
-                    : "打开系统「使用配对码配对设备」后，点下方「输入配对码」直接输入（格式: 配对码 或 配对码:端口）";
-        }
-
-        Notification.Builder nb = Build.VERSION.SDK_INT >= 26
-                ? new Notification.Builder(ctx, PAIR_CHANNEL_ID)
-                : new Notification.Builder(ctx);
-        nb.setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
-                .setContentTitle("ExtBridge 无线调试配对助手")
-                .setContentText(body)
-                .setStyle(new Notification.BigTextStyle().bigText(body))
-                .setContentIntent(openPi)
-                .addAction(replyAction)
-                .setOnlyAlertOnce(true)
-                .setAutoCancel(false);
-
-        nm.notify(PAIR_NOTIF_ID, nb.build());
+    public static void showPairingNotification(Context context, String text) {
+        initialize(context);
+        NotificationManager manager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+        if (manager == null) return;
+        if (Build.VERSION.SDK_INT >= 26) manager.createNotificationChannel(new NotificationChannel(PAIR_CHANNEL_ID, "无线调试快速配对", NotificationManager.IMPORTANCE_HIGH));
+        RemoteInput input = new RemoteInput.Builder(KEY_PAIR_INPUT).setLabel("输入六位配对码或 配对码:端口").build();
+        Intent reply = new Intent(context, AdbPairingReceiver.class).setAction(ACTION_PAIR_REPLY);
+        PendingIntent replyIntent = PendingIntent.getBroadcast(context, 2001, reply, PendingIntent.FLAG_UPDATE_CURRENT | (Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_MUTABLE : 0));
+        Intent open = new Intent(context, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        PendingIntent openIntent = PendingIntent.getActivity(context, 2002, open, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        Intent cancel = new Intent(context, AdbPairingReceiver.class).setAction(ACTION_STOP_PAIR_NOTIF);
+        PendingIntent cancelIntent = PendingIntent.getBroadcast(context, 2003, cancel, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        Notification.Builder builder = Build.VERSION.SDK_INT >= 26 ? new Notification.Builder(context, PAIR_CHANNEL_ID) : new Notification.Builder(context);
+        String body = text == null || text.isEmpty() ? "打开系统配对弹窗后输入配对码；配对完成后仍需连接并启动服务" : text;
+        builder.setSmallIcon(android.R.drawable.stat_sys_data_bluetooth).setContentTitle("无线调试配对助手")
+                .setContentText(body).setStyle(new Notification.BigTextStyle().bigText(body)).setContentIntent(openIntent)
+                .addAction(new Notification.Action.Builder(android.R.drawable.ic_menu_send, "输入配对码", replyIntent).addRemoteInput(input).build())
+                .addAction(new Notification.Action.Builder(android.R.drawable.ic_menu_close_clear_cancel, "取消", cancelIntent).build())
+                .setOnlyAlertOnce(true).setAutoCancel(false);
+        manager.notify(PAIR_NOTIF_ID, builder.build());
     }
-
-    public static void cancelPairingNotification(Context ctx) {
-        NotificationManager nm = (NotificationManager) ctx.getSystemService(Context.NOTIFICATION_SERVICE);
-        if (nm != null) nm.cancel(PAIR_NOTIF_ID);
-    }
-
-    private static void postStep(final ProgressListener l, final String msg) {
-        if (l != null) sMain.post(() -> l.onStep(msg));
-    }
-
-    private static void postResult(final ProgressListener l, final boolean ok, final String msg) {
-        if (l != null) sMain.post(() -> l.onResult(ok, msg));
-    }
-
-    private static int parseIntSafe(String s, int def) {
-        try { return Integer.parseInt(s.trim()); } catch (Throwable t) { return def; }
+    public static void cancelPairingNotification(Context context) {
+        NotificationManager manager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+        if (manager != null) manager.cancel(PAIR_NOTIF_ID);
     }
 }

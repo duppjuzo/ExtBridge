@@ -4,6 +4,10 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.os.IBinder;
 import android.os.Parcel;
+// BEGIN VERIFIED_DAEMON_STATUS
+import android.util.Log;
+import java.security.SecureRandom;
+// END VERIFIED_DAEMON_STATUS
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -11,6 +15,9 @@ import java.util.List;
 import java.util.Map;
 
 public class BridgeClient {
+    // BEGIN VERIFIED_DAEMON_STATUS
+    private static final SecureRandom PROBE_RANDOM = new SecureRandom();
+    // END VERIFIED_DAEMON_STATUS
     public static final int SYS_WIFI = 1;
     public static final int SYS_BT = 2;
     public static final int SYS_AIRPLANE = 3;
@@ -43,6 +50,14 @@ public class BridgeClient {
     private static volatile Bitmap sCachedWpBitmap;
     public static class Status {
         public boolean connected;
+        // BEGIN VERIFIED_DAEMON_STATUS
+        public int daemonPid = -1;
+        public int daemonUid = -1;
+        public boolean handshakeVerified;
+        public boolean protocolCompatible;
+        public String activationToken = "";
+        public String connectionIssue = "";
+        // END VERIFIED_DAEMON_STATUS
         public int extId = -1;
         public int vdId = -1;
         public int physW = 0;
@@ -151,54 +166,111 @@ public class BridgeClient {
         Status st = new Status();
         IBinder b = getService();
         if (b == null) return st;
+        Proof identity = verifyDaemon(b);
+        if (identity == null) {
+            st.connectionIssue = "服务状态无法确认，请重新激活";
+            return st;
+        }
+        st.handshakeVerified = true;
+        st.daemonPid = identity.pid;
+        st.daemonUid = identity.version == DaemonProtocol.PROBE_VERSION ? identity.uid : -1;
+        st.protocolCompatible = identity.version == DaemonProtocol.PROBE_VERSION;
+        st.activationToken = identity.token;
         Parcel data = Parcel.obtain();
         Parcel reply = Parcel.obtain();
         try {
             if (b.transact(15, data, reply, 0)) {
-                st.connected = true;
-                st.extId = reply.readInt();
-                st.vdId = reply.readInt();
-                st.physW = reply.readInt();
-                st.physH = reply.readInt();
-                st.physFps = reply.readInt() / 100f;
-                st.virtW = reply.readInt();
-                st.virtH = reply.readInt();
-                st.virtDpi = reply.readInt();
-                st.virtFps = reply.readInt() / 100f;
-                st.inputToExt = reply.readInt();
-                st.cursorX = reply.readInt();
-                st.cursorY = reply.readInt();
-                st.extInputCnt = reply.readInt();
-                String mr = reply.readString();
-                st.modesRaw = mr != null ? mr : "";
-                String rm = reply.readString();
-                st.renderMode = (rm != null && !rm.isEmpty()) ? rm : "NONE";
-                if (reply.dataAvail() >= 8) {
-                    st.mirrorMode = reply.readInt();
-                    st.fullscreenPolicy = reply.readInt();
+                Status parsed = DaemonProtocol.readStatus(new DaemonProtocol.Reader() {
+                    @Override public int remaining() { return reply.dataAvail(); }
+                    @Override public int readInt() { return reply.readInt(); }
+                    @Override public String readString() { return reply.readString(); }
+                });
+                if (!b.isBinderAlive()) {
+                    st.connectionIssue = "后台服务已退出，请重新激活";
+                    return st;
                 }
-                if (reply.dataAvail() >= 4) {
-                    st.virtRot = reply.readInt();
+                parsed.daemonPid = identity.pid;
+                parsed.daemonUid = identity.version == DaemonProtocol.PROBE_VERSION ? identity.uid : -1;
+                parsed.handshakeVerified = true;
+                parsed.protocolCompatible = identity.version == DaemonProtocol.PROBE_VERSION;
+                parsed.activationToken = identity.token;
+                if (AdbBootstrap.wasCancelled(identity.token)) {
+                    parsed.connectionIssue = "已取消的激活正在结束";
+                    shutdownOwned(identity.token);
+                    return parsed;
                 }
-                if (reply.dataAvail() >= 4) {
-                    st.injectStatus = reply.readInt();
-                }
-                if (reply.dataAvail() >= 8) {
-                    st.splitActive = reply.readInt();
-                    st.splitRatioPct = reply.readInt();
-                    String s0 = reply.readString();
-                    String s1 = reply.readString();
-                    st.splitSlot0Pkg = s0 != null ? s0 : "";
-                    st.splitSlot1Pkg = s1 != null ? s1 : "";
-                }
+                parsed.connected = true;
+                return parsed;
             }
-        } catch (Throwable ignored) {
+            st.connectionIssue = "后台服务未响应，请重新激活";
+        } catch (Throwable error) {
+            // Never return a partially parsed status marked as connected.
+            Log.w("ExtBridgeConnection", "Invalid daemon status response", error);
+            st.connectionIssue = "服务应答异常，请重新激活";
         } finally {
             data.recycle();
             reply.recycle();
         }
         return st;
     }
+
+    // BEGIN VERIFIED_DAEMON_STATUS
+    private static final class Proof {
+        final int pid, uid, version; final String token;
+        Proof(int pid, int uid, int version, String token) { this.pid = pid; this.uid = uid; this.version = version; this.token = token; }
+    }
+    private static Proof verifyDaemon(IBinder binder) {
+        if (binder instanceof android.os.Binder) {
+            Log.w("ExtBridgeConnection", "Local app Binder cannot be the shell daemon");
+            return null;
+        }
+        Parcel request = Parcel.obtain();
+        Parcel response = Parcel.obtain();
+        long nonce = PROBE_RANDOM.nextLong();
+        try {
+            request.writeInterfaceToken(DaemonProtocol.DESCRIPTOR);
+            request.writeLong(nonce);
+            if (!binder.transact(DaemonProtocol.PROBE_TRANSACTION, request, response, 0)) {
+                Log.w("ExtBridgeConnection", "Daemon does not support liveness verification");
+                return null;
+            }
+            response.readException();
+            if (response.dataAvail() < 24) return null;
+            int magic = response.readInt();
+            int version = response.readInt();
+            long echo = response.readLong();
+            int pid = response.readInt();
+            int uid = response.readInt();
+            if (!DaemonProtocol.validProof(magic, version, nonce, echo, pid, uid)) return null;
+            String token = "";
+            if (version >= 2) {
+                if (response.dataAvail() < 4) return null;
+                token = response.readString();
+                if (token == null || !token.isEmpty() && !token.matches("[a-zA-Z0-9_-]{16,80}")) return null;
+            }
+            if (response.dataAvail() != 0) return null;
+            return new Proof(pid, uid, version, token);
+        } catch (Throwable error) {
+            Log.w("ExtBridgeConnection", "Daemon liveness verification failed", error);
+            return null;
+        } finally {
+            request.recycle();
+            response.recycle();
+        }
+    }
+    public static boolean shutdownOwned(String token) {
+        if (token == null || token.isEmpty()) return false;
+        IBinder binder = getService();
+        if (binder == null) return false;
+        Parcel request = Parcel.obtain(); Parcel reply = Parcel.obtain();
+        try {
+            request.writeInterfaceToken(DaemonProtocol.DESCRIPTOR); request.writeString(token);
+            if (!binder.transact(DaemonProtocol.OWNED_SHUTDOWN_TRANSACTION, request, reply, 0)) return false;
+            reply.readException(); return reply.dataAvail() >= 4 && reply.readInt() == 1;
+        } catch (Throwable error) { return false; }
+        finally { request.recycle(); reply.recycle(); }
+    }
+    // END VERIFIED_DAEMON_STATUS
 
     public static int toggleInput() {
         return simpleCall(10);
@@ -272,9 +344,9 @@ public class BridgeClient {
         }
     }
 
-    public static void shutdownDaemon(android.content.Context ctx) {
+    public static boolean shutdownDaemon(android.content.Context ctx) {
         IBinder b = getService();
-        if (b != null) {
+        if (b != null && verifyDaemon(b) != null) {
             Parcel d = Parcel.obtain();
             Parcel r = Parcel.obtain();
             try {
@@ -285,7 +357,6 @@ public class BridgeClient {
                 r.recycle();
             }
         }
-        sBinder = null;
         if (ctx != null) {
             try {
                 android.content.Intent i1 = new android.content.Intent("com.extbridge.daemon.SHUTDOWN");
@@ -296,6 +367,14 @@ public class BridgeClient {
                 ctx.sendBroadcast(i2);
             } catch (Throwable ignored) {}
         }
+        if (b == null) return false;
+        long deadline = android.os.SystemClock.elapsedRealtime() + 2500;
+        while (b.isBinderAlive() && android.os.SystemClock.elapsedRealtime() < deadline) {
+            try { Thread.sleep(50); } catch (InterruptedException error) { Thread.currentThread().interrupt(); return false; }
+        }
+        if (b.isBinderAlive()) return false;
+        if (sBinder == b) sBinder = null;
+        return true;
     }
 
     public static int[] sendMouse(int actionType, float a1, float a2) {

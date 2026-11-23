@@ -296,6 +296,7 @@ public class BridgeService extends Service {
     }
 
     public static void ensureStarted(Context ctx) {
+        AdbBootstrap.initialize(ctx);
         if (sUserStopping || ctx == null) return;
         try {
             Intent i = new Intent(ctx, BridgeService.class);
@@ -316,7 +317,9 @@ public class BridgeService extends Service {
     }
 
     public static void stopAllAndExit(Context ctx) {
+        if (sUserStopping) return;
         sUserStopping = true;
+        AdbBootstrap.cancelAllActivations();
         final Context appCtx = (ctx != null) ? ctx.getApplicationContext() : sInstance;
         final BridgeService svc = sInstance;
         if (svc != null && svc.mHandler != null) {
@@ -341,27 +344,28 @@ public class BridgeService extends Service {
             } catch (Throwable ignored) {}
         }
 
-        if (appCtx != null) {
-            try {
-                android.app.ActivityManager am = (android.app.ActivityManager) appCtx.getSystemService(ACTIVITY_SERVICE);
-                if (am != null) {
-                    List<android.app.ActivityManager.AppTask> tasks = am.getAppTasks();
-                    if (tasks != null) {
-                        for (android.app.ActivityManager.AppTask t : tasks) {
-                            try { t.finishAndRemoveTask(); } catch (Throwable ignored) {}
-                        }
-                    }
-                }
-            } catch (Throwable ignored) {}
-        }
-
         new Thread(() -> {
+            boolean stopped = false;
             try {
                 for (int i = 0; i < 8 && BridgeClient.getService() == null; i++) {
                     Thread.sleep(200);
                 }
-                BridgeClient.shutdownDaemon(appCtx);
+                stopped = BridgeClient.shutdownDaemon(appCtx);
             } catch (Throwable ignored) {}
+            if (!stopped && BridgeClient.getService() != null) {
+                sUserStopping = false;
+                if (appCtx != null) new Handler(Looper.getMainLooper()).post(() -> {
+                    Toast.makeText(appCtx, "后台停止未确认，请重试", Toast.LENGTH_LONG).show();
+                    ensureStarted(appCtx); refreshFromReceiver(appCtx);
+                });
+                return;
+            }
+            if (appCtx != null) {
+                try {
+                    android.app.ActivityManager am = (android.app.ActivityManager) appCtx.getSystemService(ACTIVITY_SERVICE);
+                    for (android.app.ActivityManager.AppTask task : am.getAppTasks()) task.finishAndRemoveTask();
+                } catch (Throwable ignored) {}
+            }
             try { Thread.sleep(160); } catch (Throwable ignored) {}
             if (svc != null) {
                 try { svc.stopSelf(); } catch (Throwable ignored) {}
@@ -471,7 +475,7 @@ public class BridgeService extends Service {
 
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= 26) {
-            NotificationChannel ch = new NotificationChannel(CH_ID, "ExtBridge 外接屏控制", NotificationManager.IMPORTANCE_LOW);
+            NotificationChannel ch = new NotificationChannel(CH_ID, "外接屏控制", NotificationManager.IMPORTANCE_LOW);
             ch.setDescription("通知栏一键切换平板/扩展屏键鼠、进入大触摸板及分辨率控制台");
             ch.setShowBadge(false);
             mNm.createNotificationChannel(ch);
@@ -520,21 +524,21 @@ public class BridgeService extends Service {
         String body;
         String toggleLabel;
         if (!st.connected) {
-            title = "ExtBridge 未连接后台服务";
+            title = "后台服务未连接";
             body = "点击打开控制台激活，或点下方「⏻ 停止并退出」关闭常驻";
             toggleLabel = "⇄ 切换键鼠";
         } else if (mirrorActive) {
-            title = "ExtBridge 原生镜像模式 · 物理 Display #" + st.extId;
+            title = "原生镜像模式 · 物理 Display #" + st.extId;
             body = "外接屏正在同步手机/平板主屏 | 点击右侧「切回DeX」恢复独立大屏桌面";
             toggleLabel = st.inputToExt == 1 ? "⇄ 切到本机" : "⇄ 切回外接";
         } else if (st.vdId <= 0) {
-            title = "ExtBridge 待机中 · 等待 USB-C 外接屏";
+            title = "待机中 · 等待 USB-C 外接屏";
             body = "预设 " + st.virtW + "×" + st.virtH + " (" + st.virtDpi + "dpi) | 不用时可点「⏻ 停止并退出」";
             toggleLabel = st.inputToExt == 1 ? "⇄ 切到平板" : "⇄ 切回扩展屏";
         } else {
             String target = st.inputToExt == 1 ? "外接扩展屏" : "平板本机";
             String modeTag = mUsingA11yOverlay ? "无障碍B" : "兼容A";
-            title = "ExtBridge 已挂载(" + modeTag + ") · "
+            title = "扩展桌面(" + modeTag + ") · "
                     + st.virtW + "×" + st.virtH + " @" + Math.round(st.virtFps) + "Hz";
             body = "键鼠控制：【" + target + "】 | 点通知本体进控制台，右侧按钮一键回桌面";
             toggleLabel = st.inputToExt == 1 ? "⇄ 键鼠切回平板" : "⇄ 键鼠切回扩展屏";

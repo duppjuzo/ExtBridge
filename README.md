@@ -1,4 +1,6 @@
-# ExtBridge Lite (`v3.4.2-lite`) — 跨系统高兼容纯净版 Type-C 类 DeX 扩展桌面系统
+# ExtBridge Lite (`v3.4.2-lite`) — Miuix 界面的跨系统扩展桌面
+
+> 本分支将主控台和触摸板迁移为 Compose + Miuix 0.9.4，并更新激活流程与守护进程协议验证；Lite 显示内核、Dock 和外接桌面不变。
 
 > **无需 Root · 单个 APK 自激活 · 面向多品牌 Android 系统（ColorOS / OriginOS / Flyme / 类原生 AOSP / HyperOS 等）的高兼容纯净分支 · [📖 使用说明书](docs/USER_GUIDE.md) · [📝 v3.4.2-lite 分支说明](docs/RELEASE_v3.4.2-lite.md)**
 
@@ -52,14 +54,14 @@
 │       └── ExtBridge.java                   # 物理屏接管、单 VirtualDisplay 投射、纯净镜像合成、
 │                                            # 分屏/键鼠注入、一键黑屏调光、跨系统反射兼容
 ├── helper/                                  # Android 客户端 App (com.extbridge.helper)
-│   ├── AndroidManifest.xml                  # 清单声明 (v3.4.2-lite / code 21)
+│   ├── AndroidManifest.xml                  # 组件与权限声明；版本配置在 build.gradle.kts
 │   ├── jniLibs/arm64-v8a/libadb.so          # 内置 arm64 adb 二进制，供免电脑无线调试自激活使用
 │   ├── res/
 │   └── src/com/extbridge/helper/
-│       ├── MainActivity.java                # 控制台主界面（分辨率/旋转/一键黑屏/分应用兼容/激活引导）
+│       ├── MainActivity.kt                  # Miuix 控制台（导航/显示/规则/设置/权限与激活抽屉）
 │       ├── LauncherActivity.java            # 外接屏独立桌面启动器（壁纸同步、拼音检索、分屏/兼容菜单）
 │       ├── BridgeService.java               # 前台服务（Dock、快捷浮窗、分屏分割条、黑屏遮罩、光标）
-│       ├── TouchpadActivity.java            # 手机/平板端大触摸板、一键黑屏与软键盘输入转发
+│       ├── TouchpadActivity.kt              # Miuix 触摸板控件 + 原生手势区域、软键盘输入转发
 │       ├── BridgeClient.java                # Binder IPC 客户端与多品牌权限提示工具
 │       ├── BridgeProvider.java              # 安全分发 Binder 句柄（UID 白名单鉴权）
 │       ├── ControlReceiver.java             # `goAsync()` 异步后台广播接收器
@@ -71,7 +73,7 @@
 │   ├── RELEASE_v3.4.2-lite.md               # Lite 分支更新与裁剪说明
 │   └── images/                              # 实机功能截图
 ├── .github/workflows/build.yml              # GitHub Actions 自动构建与 Release 工作流
-└── build_v3.ps1                             # Windows 免 Gradle 一键编译脚本
+└── build_v3.ps1                             # Windows 一键编译 Lite daemon + Gradle 客户端 (JDK 21+)
 ```
 
 ---
