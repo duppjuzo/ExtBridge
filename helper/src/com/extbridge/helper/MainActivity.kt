@@ -130,6 +130,7 @@ class MainActivity : ComponentActivity() {
     private var liquidGlass by mutableStateOf(true)
     private var tab by mutableIntStateOf(0)
     private var aboutOpen by mutableStateOf(false)
+    private var openSourceOpen by mutableStateOf(false)
     private var dimmed by mutableStateOf(false)
     private var autoHide by mutableStateOf(true)
     private var notice by mutableStateOf("")
@@ -213,6 +214,7 @@ class MainActivity : ComponentActivity() {
         liquidGlass = ExtThemePrefs.isLiquidGlassEnabled(this)
         tab = savedInstanceState?.getInt("tab")?.coerceIn(0, 3) ?: 0
         aboutOpen = savedInstanceState?.getBoolean("aboutOpen") ?: false
+        openSourceOpen = savedInstanceState?.getBoolean("openSourceOpen") ?: false
         showActivation = savedInstanceState?.getBoolean("showActivation") ?: false
         skipActivation = savedInstanceState?.getBoolean("skipActivation") ?: false
         activationTab = savedInstanceState?.getInt("activationTab")?.coerceIn(0, 2) ?: 1
@@ -248,6 +250,7 @@ class MainActivity : ComponentActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putInt("tab", tab)
         outState.putBoolean("aboutOpen", aboutOpen)
+        outState.putBoolean("openSourceOpen", openSourceOpen)
         outState.putBoolean("showActivation", showActivation)
         outState.putBoolean("skipActivation", skipActivation)
         outState.putInt("activationTab", activationTab)
@@ -469,10 +472,15 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun AppShell() {
         val backStack = remember {
-            if (aboutOpen) navBackStackOf(AboutRoute) else navBackStackOf(MainRoute)
+            when {
+                openSourceOpen -> navBackStackOf(MainRoute, AboutRoute, OpenSourceRoute)
+                aboutOpen -> navBackStackOf(MainRoute, AboutRoute)
+                else -> navBackStackOf(MainRoute)
+            }
         }
         val navigator = remember(backStack) { NavController(backStack) }
         val showingAbout = backStack.lastOrNull() == AboutRoute
+        val showingOpenSource = backStack.lastOrNull() == OpenSourceRoute
         val pagerState = rememberPagerState(initialPage = tab.coerceIn(0, 3)) { TAB_COUNT }
         val scope = rememberCoroutineScope()
         var navigating by remember { mutableStateOf(false) }
@@ -484,7 +492,8 @@ class MainActivity : ComponentActivity() {
         }
         SideEffect {
             tab = selectedTab
-            aboutOpen = showingAbout
+            aboutOpen = showingAbout || showingOpenSource
+            openSourceOpen = showingOpenSource
         }
 
         val selectTab: (Int) -> Unit = { index ->
@@ -512,7 +521,7 @@ class MainActivity : ComponentActivity() {
                         navController = navigator,
                         modifier = Modifier.fillMaxSize(),
                         onBack = {
-                            if (showingAbout) navigator.pop()
+                            if (backStack.size > 1) navigator.pop()
                             else if (selectedTab != 0) selectTab(0)
                             else finish()
                         },
@@ -531,11 +540,20 @@ class MainActivity : ComponentActivity() {
                                 backdrop = backdropFor(miuixBlur),
                                 settingsScrollState = settingsScrollState,
                                 onTabSelected = selectTab,
-                                onOpenAbout = { if (!showingAbout) navigator.push(AboutRoute) },
+                                onOpenAbout = { if (backStack.lastOrNull() == MainRoute) navigator.push(AboutRoute) },
                             )
                         }
                         entry<AboutRoute>(transition = NavTransitions.MiuixDefault) {
-                            AboutPage(wide = wide, onBack = { navigator.pop() })
+                            AboutPage(
+                                wide = wide,
+                                onBack = { navigator.pop() },
+                                onOpenSource = {
+                                    if (backStack.lastOrNull() == AboutRoute) navigator.push(OpenSourceRoute)
+                                },
+                            )
+                        }
+                        entry<OpenSourceRoute>(transition = NavTransitions.MiuixDefault) {
+                            OpenSourcePage(wide = wide, onBack = { navigator.pop() }, onOpenLink = ::openProjectLink)
                         }
                     }
                     Overlays()
@@ -1159,64 +1177,33 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** 关于软件：1:1 复刻 compose-miuix-ui 示例的 About 页（动态粉色渐变背景 + 玻璃质感卡片）。 */
     @Composable
-    private fun AboutPage(wide: Boolean, onBack: () -> Unit) {
-        val info = remember {
-            val pi = runCatching { packageManager.getPackageInfo(packageName, 0) }.getOrNull()
-            AboutMeta(
-                version = appVersion.ifBlank { "—" },
-                versionCode = appVersionCode,
-                abi = Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a",
-                targetSdk = pi?.applicationInfo?.targetSdkVersion ?: 35,
-            )
-        }
+    private fun AboutPage(wide: Boolean, onBack: () -> Unit, onOpenSource: () -> Unit) {
         com.extbridge.helper.ui.AboutPage(
             appName = "ExtBridge Lite",
-            versionLabel = "v${info.version} (${info.versionCode})",
+            versionLabel = "v${appVersion.ifBlank { "—" }} ($appVersionCode)",
             isDark = isEffectiveDark(themeMode),
             isWideScreen = wide,
             launcherIcon = painterResource(R.mipmap.ic_launcher),
             onBack = onBack,
         ) {
             Card(modifier = Modifier.fillMaxWidth()) {
-                BasicComponent(title = "版本代码", endActions = {
-                    Text("${info.versionCode}", fontSize = MiuixTheme.textStyles.body2.fontSize,
-                        color = MiuixTheme.colorScheme.onSurfaceVariantActions)
-                })
-                BasicComponent(title = "系统版本", endActions = {
-                    Text("Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
-                        fontSize = MiuixTheme.textStyles.body2.fontSize,
-                        color = MiuixTheme.colorScheme.onSurfaceVariantActions)
-                })
-                BasicComponent(title = "运行架构", endActions = {
-                    Text(info.abi, fontSize = MiuixTheme.textStyles.body2.fontSize,
-                        color = MiuixTheme.colorScheme.onSurfaceVariantActions)
-                })
+                ArrowPreference(
+                    title = "GitHub",
+                    summary = "github.com/duppjuzo/ExtBridge",
+                    onClick = { openProjectLink(EXTBRIDGE_GITHUB_URL) },
+                )
             }
             Card(modifier = Modifier.fillMaxWidth().padding(top = 12.dp)) {
-                BasicComponent(title = "界面主题", endActions = {
-                    Text(ExtThemePrefs.labels[themeMode], fontSize = MiuixTheme.textStyles.body2.fontSize,
-                        color = MiuixTheme.colorScheme.onSurfaceVariantActions)
-                })
-                BasicComponent(title = "界面框架", endActions = {
-                    Text("Miuix 0.9.4", fontSize = MiuixTheme.textStyles.body2.fontSize,
-                        color = MiuixTheme.colorScheme.onSurfaceVariantActions)
-                })
-                BasicComponent(title = "开源许可", endActions = {
-                    Text("Apache-2.0", fontSize = MiuixTheme.textStyles.body2.fontSize,
-                        color = MiuixTheme.colorScheme.onSurfaceVariantActions)
-                })
+                ArrowPreference(title = "关于开源", onClick = onOpenSource)
             }
         }
     }
 
-    private data class AboutMeta(
-        val version: String,
-        val versionCode: Long,
-        val abi: String,
-        val targetSdk: Int,
-    )
+    private fun openProjectLink(url: String) {
+        runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+            .onFailure { toast("无法打开链接，请检查是否已安装浏览器") }
+    }
 
     private fun openActivation(clearMessage: Boolean = true) {
         skipActivation = false
@@ -1569,6 +1556,7 @@ class MainActivity : ComponentActivity() {
 
 private data object MainRoute : NavKey
 private data object AboutRoute : NavKey
+private data object OpenSourceRoute : NavKey
 
 private const val TAB_COUNT = 4
 
