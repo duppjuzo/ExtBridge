@@ -75,11 +75,6 @@ private val openSourceProjects = listOf(
         "https://github.com/Kotlin/kotlinx.collections.immutable",
         "https://github.com/Kotlin/kotlinx.collections.immutable/blob/HEAD/LICENSE.txt",
     ),
-    OpenSourceProject(
-        "Android Debug Bridge (ADB)", "内置无线调试客户端；链接为 AOSP 源码的 LineageOS 镜像",
-        "https://github.com/LineageOS/android_packages_modules_adb",
-        "https://github.com/LineageOS/android_packages_modules_adb/blob/HEAD/NOTICE",
-    ),
 )
 
 @Composable
