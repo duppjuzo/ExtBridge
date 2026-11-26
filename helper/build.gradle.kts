@@ -13,7 +13,9 @@ android {
         applicationId = "com.extbridge.helper"
         minSdk = 30
         targetSdk = 35
-        versionCode = 31
+        // Keep below main's versionCode so users can overwrite-install back to the
+        // official build; align with the <=27 compatibility ceiling.
+        versionCode = 26
         versionName = "3.4.2-lite"
         ndk { abiFilters += "arm64-v8a" }
     }
@@ -38,6 +40,12 @@ android {
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
+    }
+    // Keep assets/extbridge.jar stored uncompressed in the APK: the on-device deploy
+    // script extracts it with toybox `unzip`, and a stored entry is the most reliable
+    // form on strict ROMs (MIUI 分身 / unopened security settings).
+    androidResources {
+        noCompress += "jar"
     }
     packaging {
         jniLibs.useLegacyPackaging = true

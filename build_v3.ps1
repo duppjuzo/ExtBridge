@@ -28,6 +28,28 @@ $classFiles = @(Get-ChildItem $classes -Recurse -Filter "*.class" | ForEach-Obje
 if (Test-Path "$out\extbridge.jar") { Remove-Item "$out\extbridge.jar" -Force }
 & "$bt\d8.bat" --min-api 30 --output "$out\extbridge.jar" @classFiles
 if ($LASTEXITCODE -ne 0) { throw "Lite daemon d8 failed: $LASTEXITCODE" }
+# Normalize d8's ZIP headers into a canonical archive so `unzip -p`/`unzip -tq`
+# keep working on strict ROMs (MIUI 分身 / 未开启安全设置) that reject non-standard
+# local-header layouts. Repack with stored entries + Deflate, preserving entry order.
+$zipSrc = Join-Path $out "extbridge.jar"
+$zipTmp = "$zipSrc.norm"
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$inZip = [System.IO.Compression.ZipFile]::OpenRead($zipSrc)
+try {
+    $outZip = [System.IO.Compression.ZipFile]::Open($zipTmp, 'Create')
+    try {
+        foreach ($entry in $inZip.Entries) {
+            $outEntry = $outZip.CreateEntry($entry.FullName, [System.IO.Compression.CompressionLevel]::Optimal)
+            $inStream = $entry.Open()
+            $outStream = $outEntry.Open()
+            try { $inStream.CopyTo($outStream) } finally {
+                $outStream.Dispose(); $inStream.Dispose()
+            }
+        }
+    } finally { $outZip.Dispose() }
+} finally { $inZip.Dispose() }
+Move-Item -Force $zipTmp $zipSrc
 Copy-Item "$out\extbridge.jar" "$assets\extbridge.jar" -Force
 Push-Location $root
 try {
@@ -37,7 +59,7 @@ try {
 } finally { Pop-Location }
 $signed = $false
 if ($Configuration -eq "Debug") {
-    $apk = Join-Path $out "ExtBridge_Lite-debug.apk"
+    $apk = Join-Path $out "exthelper.apk"
     Copy-Item (Join-Path $root "helper\build\outputs\apk\debug\helper-debug.apk") $apk -Force
     $signed = $true
 } else {
@@ -50,12 +72,12 @@ if ($Configuration -eq "Debug") {
     }
     if ($ksPath) {
         if (-not $env:EXTBRIDGE_KEYSTORE_PASS) { throw "Set EXTBRIDGE_KEYSTORE_PASS to sign Release." }
-        $apk = Join-Path $out "ExtBridge_Lite.apk"
+        $apk = Join-Path $out "exthelper.apk"
         & "$bt\apksigner.bat" sign --ks $ksPath --ks-pass env:EXTBRIDGE_KEYSTORE_PASS --out $apk $releaseApk
         if ($LASTEXITCODE -ne 0) { throw "Release signing failed: $LASTEXITCODE" }
         $signed = $true
     } else {
-        $apk = Join-Path $out "ExtBridge_Lite-unsigned.apk"
+        $apk = Join-Path $out "exthelper-unsigned.apk"
         Copy-Item $releaseApk $apk -Force
         Write-Warning "Release APK is unsigned; provide EXTBRIDGE_KEYSTORE and EXTBRIDGE_KEYSTORE_PASS to sign it."
     }
