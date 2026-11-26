@@ -122,14 +122,24 @@ public class BridgeClient {
         } catch (Throwable ignored) {}
     }
 
-    public static void setBinder(IBinder b) {
-        if (b != null && b.pingBinder()) {
-            sBinder = b;
-            linkBinderDeath(b);
-            for (Runnable r : sBinderListeners) {
-                try { r.run(); } catch (Throwable ignored) {}
-            }
+    /** Called only by the UID-gated provider or the signature-protected receiver. */
+    static boolean receiveDaemonBinder(android.content.Context context, IBinder b) {
+        Proof proof = b == null ? null : verifyDaemon(b);
+        if (proof == null) return false;
+        sBinder = b;
+        linkBinderDeath(b);
+        if (AdbBootstrap.wasCancelled(proof.token)) {
+            shutdownOwned(proof.token);
+            return false;
         }
+        // Keep the authenticated handle available to a pending shutdown without restarting the service.
+        if (BridgeService.sUserStopping) return true;
+        for (Runnable r : sBinderListeners) {
+            try { r.run(); } catch (Throwable ignored) {}
+        }
+        BridgeService.ensureStarted(context);
+        BridgeService.refreshFromReceiver(context);
+        return true;
     }
 
     public static void requestBinder(android.content.Context ctx) {
@@ -137,10 +147,16 @@ public class BridgeClient {
         try {
             android.content.Intent i1 = new android.content.Intent("com.extbridge.daemon.NEED_BINDER");
             i1.setPackage("android");
-            ctx.sendBroadcast(i1);
             android.content.Intent i2 = new android.content.Intent("com.extbridge.daemon.NEED_BINDER");
             i2.setPackage("com.android.shell");
-            ctx.sendBroadcast(i2);
+            if (android.os.Build.VERSION.SDK_INT >= 34) {
+                android.os.Bundle options = android.app.BroadcastOptions.makeBasic().setShareIdentityEnabled(true).toBundle();
+                ctx.sendBroadcast(i1, null, options);
+                ctx.sendBroadcast(i2, null, options);
+            } else {
+                ctx.sendBroadcast(i1);
+                ctx.sendBroadcast(i2);
+            }
         } catch (Throwable ignored) {}
     }
 
@@ -150,15 +166,6 @@ public class BridgeClient {
             if (b.pingBinder()) return b;
             sBinder = null;
         }
-        try {
-            Class<?> sm = Class.forName("android.os.ServiceManager");
-            b = (IBinder) sm.getMethod("getService", String.class).invoke(null, "extbridge");
-            if (b != null && b.pingBinder()) {
-                sBinder = b;
-                linkBinderDeath(b);
-                return b;
-            }
-        } catch (Throwable ignored) {}
         return null;
     }
 
@@ -344,7 +351,7 @@ public class BridgeClient {
         }
     }
 
-    public static boolean shutdownDaemon(android.content.Context ctx) {
+    public static boolean shutdownDaemon() {
         IBinder b = getService();
         if (b != null && verifyDaemon(b) != null) {
             Parcel d = Parcel.obtain();
@@ -356,16 +363,6 @@ public class BridgeClient {
                 d.recycle();
                 r.recycle();
             }
-        }
-        if (ctx != null) {
-            try {
-                android.content.Intent i1 = new android.content.Intent("com.extbridge.daemon.SHUTDOWN");
-                i1.setPackage("android");
-                ctx.sendBroadcast(i1);
-                android.content.Intent i2 = new android.content.Intent("com.extbridge.daemon.SHUTDOWN");
-                i2.setPackage("com.android.shell");
-                ctx.sendBroadcast(i2);
-            } catch (Throwable ignored) {}
         }
         if (b == null) return false;
         long deadline = android.os.SystemClock.elapsedRealtime() + 2500;

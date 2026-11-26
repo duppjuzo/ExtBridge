@@ -33,7 +33,7 @@ public class ControlReceiver extends BroadcastReceiver {
         // Exported ControlReceiver is enforced by android:permission="android.permission.INJECT_EVENTS"
         // (pure signature permission held by com.android.shell, impossible to grant to 3rd-party apps).
         // The official signing certificate is pinned on the daemon side (getVerifiedHelperUid)
-        // and at release-build time in helper/build.gradle.kts.
+        // and on the final release APK by build_v3.ps1.
         // On Android 14+, when sender identity is explicitly shared (uid != INVALID_UID), also
         // enforce the strict UID allowlist.
         if (Build.VERSION.SDK_INT >= 34) {
@@ -55,22 +55,14 @@ public class ControlReceiver extends BroadcastReceiver {
         }
 
         if ("com.extbridge.helper.BINDER_PUSH".equals(act)) {
-            if (this instanceof Internal || BridgeService.sUserStopping) return;
+            if (this instanceof Internal) return;
             if (Build.VERSION.SDK_INT >= 34) {
                 int uid = getSentFromUid();
                 if (uid != android.os.Process.INVALID_UID && uid != 0 && uid != 1000 && uid != 2000) return;
             }
             android.os.Bundle extras = intent.getExtras();
             android.os.IBinder cb = (extras != null) ? extras.getBinder("cb") : null;
-            if (cb != null && cb.pingBinder()) {
-                try {
-                    if (DaemonProtocol.DESCRIPTOR.equals(cb.getInterfaceDescriptor())) {
-                        BridgeClient.setBinder(cb);
-                        BridgeService.ensureStarted(context);
-                        BridgeService.refreshFromReceiver(context);
-                    }
-                } catch (Throwable ignored) {}
-            }
+            BridgeClient.receiveDaemonBinder(context, cb);
             return;
         }
 

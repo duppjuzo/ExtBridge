@@ -12,7 +12,7 @@ public final class DaemonProtocol {
 
     public static boolean validProof(int magic, int version, long sentNonce, long receivedNonce, int pid, int uid) {
         return magic == PROBE_MAGIC && (version == 1 || version == PROBE_VERSION) && sentNonce == receivedNonce
-                && pid > 0 && (uid == 2000 || uid == 0);
+                && pid > 0 && uid == 2000;
     }
 
     public interface Reader {

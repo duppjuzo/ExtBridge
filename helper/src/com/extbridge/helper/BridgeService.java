@@ -348,9 +348,10 @@ public class BridgeService extends Service {
             boolean stopped = false;
             try {
                 for (int i = 0; i < 8 && BridgeClient.getService() == null; i++) {
+                    if (i == 0 || i == 4) BridgeClient.requestBinder(appCtx);
                     Thread.sleep(200);
                 }
-                stopped = BridgeClient.shutdownDaemon(appCtx);
+                stopped = BridgeClient.shutdownDaemon();
             } catch (Throwable ignored) {}
             if (!stopped && BridgeClient.getService() != null) {
                 sUserStopping = false;
@@ -422,14 +423,7 @@ public class BridgeService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (sUserStopping || (intent != null && ACTION_EXIT_ALL.equals(intent.getAction()))) {
-            stopAllAndExit(this);
-            return START_NOT_STICKY;
-        }
-        if (intent != null && intent.getExtras() != null) {
-            IBinder cb = intent.getExtras().getBinder("cb");
-            if (cb != null) BridgeClient.setBinder(cb);
-        }
+        if (sUserStopping) return START_NOT_STICKY;
         if (BridgeClient.getService() == null) {
             BridgeClient.requestBinder(this);
         }

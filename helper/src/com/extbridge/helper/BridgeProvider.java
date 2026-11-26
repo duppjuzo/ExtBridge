@@ -34,7 +34,7 @@ public class BridgeProvider extends ContentProvider {
         if ("stopForActivation".equals(method)) {
             Bundle result = new Bundle();
             if (arg == null || !arg.matches("[a-zA-Z0-9_-]{16,80}")) { result.putBoolean("stopped", false); return result; }
-            result.putBoolean("stopped", BridgeClient.shutdownDaemon(getContext()));
+            result.putBoolean("stopped", BridgeClient.shutdownDaemon());
             return result;
         }
         if ("getNativeAdbInfo".equals(method)) return AdbBootstrap.nativeAdbDiagnostics(getContext());
@@ -60,15 +60,7 @@ public class BridgeProvider extends ContentProvider {
         // END DAEMON_STATUS_DIAGNOSTICS
         if ("setBinder".equals(method) && extras != null) {
             IBinder b = extras.getBinder("cb");
-            if (b != null && b.pingBinder()) {
-                BridgeClient.setBinder(b);
-                BridgeClient.Status status = BridgeClient.getStatus();
-                if (BridgeService.sUserStopping || AdbBootstrap.wasCancelled(status.activationToken)) {
-                    BridgeClient.shutdownOwned(status.activationToken);
-                    Bundle denied = new Bundle(); denied.putBoolean("ok", false); return denied;
-                }
-                BridgeService.ensureStarted(getContext());
-                BridgeService.refreshFromReceiver(getContext());
+            if (BridgeClient.receiveDaemonBinder(getContext(), b)) {
                 Bundle ok = new Bundle();
                 ok.putBoolean("ok", true);
                 ok.putBinder("proc", sProcToken);

@@ -232,33 +232,56 @@ public final class AdbBootstrap {
         } catch (Throwable ignored) {}
         return fallback;
     }
-    public static String buildPcAdbCommand() { return DaemonLaunchScript.pcCommand(); }
+    private static int helperUser() { return android.os.Process.myUid() / 100000; }
+    public static String buildPcAdbCommand() { return DaemonLaunchScript.pcCommand(helperUser()); }
     private static File getPrivateAdbSocketFile(Context context) {
         File sockDir = new File(context.getCacheDir(), "asrv");
-        if (!sockDir.exists()) sockDir.mkdirs();
-        // 0700: only the app process can traverse this directory, so other
-        // networking apps on the device cannot reach the local adb server.
-        sockDir.setReadable(false, false);
-        sockDir.setReadable(true, true);
-        sockDir.setWritable(false, false);
-        sockDir.setWritable(true, true);
-        sockDir.setExecutable(false, false);
-        sockDir.setExecutable(true, true);
+        if (!sockDir.isDirectory() && !sockDir.mkdir() && !sockDir.isDirectory()) throw new IllegalStateException("Cannot create private socket directory");
+        try { android.system.Os.chmod(sockDir.getAbsolutePath(), 0700); }
+        catch (android.system.ErrnoException error) { throw new IllegalStateException("Cannot secure adb socket directory", error); }
         return new File(sockDir, "a.sock");
     }
 
-    private static void stopLocalAdbServerSync(Context appCtx) {
-        if (appCtx == null) return;
-        if (isNativeAdbAvailable(appCtx)) {
-            try { runAdb(appCtx, 1500, "disconnect"); } catch (Throwable ignored) {}
-            try { runAdb(appCtx, 2500, "kill-server"); } catch (Throwable ignored) {}
+    private static final class PrivateAdbServer {
+        private final Context app;
+        private File socket;
+        private Process server;
+        PrivateAdbServer(Context app) { this.app = app; }
+
+        ActivationFlow.Command start(ActivationSession.Ticket ticket) {
+            try {
+                socket = getPrivateAdbSocketFile(app);
+                if (socket.exists()) {
+                    runAdb(app, 2500, "kill-server");
+                    if (ticket.isCancelled()) return new ActivationFlow.Command(125, "CANCELLED");
+                    if (socket.exists() && !socket.delete()) throw new IOException("Stale private socket");
+                }
+                // Avoid adb's re-exec via /proc/self/exe (broken under ARM translation).
+                ProcessBuilder builder = adbBuilder(app, "-L", "localfilesystem:" + socket.getAbsolutePath(), "nodaemon", "server");
+                ++adbExecutions;
+                server = builder.redirectErrorStream(true).redirectOutput(new File(app.getCacheDir(), "adb_tmp/server.log")).start();
+                server.getOutputStream().close();
+                long deadline = SystemClock.elapsedRealtime() + 5000;
+                while (server.isAlive() && SystemClock.elapsedRealtime() < deadline) {
+                    if (ticket.isCancelled()) return new ActivationFlow.Command(125, "CANCELLED");
+                    if (socket.exists()) return new ActivationFlow.Command(0, "");
+                    SystemClock.sleep(40);
+                }
+            } catch (Exception error) { Log.w(TAG, "Private adb server did not start", error); }
+            return new ActivationFlow.Command(-2, "Private adb server unavailable");
         }
-        // Always drop the socket file: a server left behind would keep the app-private
-        // 0700 unix socket alive for the next activation to collide with.
-        try {
-            File sockFile = getPrivateAdbSocketFile(appCtx);
-            if (sockFile.exists()) sockFile.delete();
-        } catch (Throwable ignored) {}
+
+        void close() {
+            if (socket == null) return;
+            try { runAdb(app, 2500, "kill-server"); }
+            finally {
+                if (server != null && server.isAlive()) {
+                    try { if (!server.waitFor(500, TimeUnit.MILLISECONDS)) server.destroyForcibly(); }
+                    catch (InterruptedException e) { server.destroyForcibly(); Thread.currentThread().interrupt(); }
+                }
+                socket.delete();
+            }
+        }
     }
 
     private static File getAdbFile(Context context) { return new File(context.getApplicationInfo().nativeLibraryDir, "libadb.so"); }
@@ -294,17 +317,20 @@ public final class AdbBootstrap {
         File cancelFile = new File(app.getFilesDir(), "activation-cancel-" + ticket.token);
         ticket.onCancel(() -> invalidateLaunch(app, ticket, cancelFile));
         sExec.execute(() -> {
+            PrivateAdbServer server = new PrivateAdbServer(app);
+            ActivationFlow.Result result;
             try {
                 WORKER.set(ticket);
                 lastOutcome = "RUNNING"; lastStage = "VALIDATE"; lastMode = request.mode.name(); lastToken = ticket.token;
-                ActivationFlow.Result result = ActivationFlow.run(request, ticket.token, new ActivationFlow.Environment() {
+                result = ActivationFlow.run(request, ticket.token, new ActivationFlow.Environment() {
                     public boolean cancelled() { return ticket.isCancelled() || BridgeService.sUserStopping || request.mode == ActivationSession.Mode.AUTO_ROOT && !isAutoRootEnabled(app); }
                     public boolean adbAvailable() { return isNativeAdbAvailable(app); }
+                    public ActivationFlow.Command startAdbServer() { return server.start(ticket); }
                     public boolean hostAllowed(String host) { return localHost(host); }
                     public ActivationFlow.Command adb(String... args) { return runAdb(app, 18000, args); }
                     public ActivationFlow.Command root(String script) { return runSu(18000, script); }
-                    public String script(String token, String stagedJar, boolean root) { return DaemonLaunchScript.build(token, stagedJar, root ? cancelFile.getAbsolutePath() : null, root); }
-                    public String stagedJar() { return stageBridgeJar(app, ticket.token); }
+                    public String script(String token, String stagedJar, String sha256, boolean root) { return DaemonLaunchScript.build(token, stagedJar, sha256, helperUser(), root ? cancelFile.getAbsolutePath() : null, root); }
+                    public ActivationFlow.StagedJar stagedJar() { return stageBridgeJar(app, ticket.token); }
                     public int discoverConnectPort() { return getDiscoveryState().connectPort; }
                     public ActivationFlow.Probe probe() {
                         BridgeClient.requestBinder(app); BridgeClient.Status status = BridgeClient.getStatus();
@@ -323,29 +349,41 @@ public final class AdbBootstrap {
                 // returned. Revoke only this token, never an unrelated existing daemon.
                 if (ticket.isCancelled() || rejectedLaunch) BridgeClient.shutdownOwned(ticket.token);
                 if (ticket.sameGeneration()) { lastOutcome = result.outcome.name(); lastStage = result.stage.name(); }
-                ticket.finish(); WORKER.remove();
-                if (!ticket.isCancelled() && !rejectedLaunch) { cancelFile.delete(); new File(app.getFilesDir(), "extbridge-stage-" + ticket.token + ".jar").delete(); }
-                if (listener != null) sMain.post(() -> { if (ticket.mayDeliver()) listener.onActivationResult(result); });
+                if (!ticket.isCancelled() && !rejectedLaunch) cancelFile.delete();
             } finally {
                 // Always tear down the local adb server once activation ends so no
                 // lingering server (and its private socket) survives the flow.
-                stopLocalAdbServerSync(app);
+                ticket.finish();
+                WORKER.remove(); // cleanup must also run after cancellation
+                try {
+                    server.close();
+                } finally {
+                    new File(app.getFilesDir(), "extbridge-stage-" + ticket.token + ".jar").delete();
+                }
             }
+            if (listener != null) sMain.post(() -> { if (ticket.mayDeliver()) listener.onActivationResult(result); });
         });
         return ticket;
     }
-    private static String stageBridgeJar(Context context, String token) {
+    private static ActivationFlow.StagedJar stageBridgeJar(Context context, String token) {
         File file = new File(context.getFilesDir(), "extbridge-stage-" + token + ".jar");
         try (InputStream in = context.getAssets().open("extbridge.jar"); OutputStream out = new FileOutputStream(file)) {
             byte[] buffer = new byte[8192]; int count;
-            while ((count = in.read(buffer)) > 0) out.write(buffer, 0, count);
-            return file.getAbsolutePath();
-        } catch (IOException error) { throw new IllegalStateException("Unable to stage daemon", error); }
+            java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+            while ((count = in.read(buffer)) != -1) { digest.update(buffer, 0, count); out.write(buffer, 0, count); }
+            StringBuilder hex = new StringBuilder(64);
+            for (byte b : digest.digest()) hex.append(String.format(Locale.ROOT, "%02x", b & 255));
+            return new ActivationFlow.StagedJar(file.getAbsolutePath(), hex.toString());
+        } catch (IOException | java.security.NoSuchAlgorithmException error) { throw new IllegalStateException("Unable to stage daemon", error); }
     }
     private static ActivationFlow.Command runSu(long timeout, String script) {
         return command(new ProcessBuilder("su", "-c", script), timeout);
     }
     private static ActivationFlow.Command runAdb(Context context, long timeout, String... args) {
+        try { return command(adbBuilder(context, args), timeout); }
+        catch (RuntimeException error) { Log.w(TAG, "Private adb socket unavailable", error); return new ActivationFlow.Command(-2, "Private socket unavailable"); }
+    }
+    private static ProcessBuilder adbBuilder(Context context, String... args) {
         File home = new File(context.getFilesDir(), "adb_home"), androidHome = new File(home, ".android"), tmp = new File(context.getCacheDir(), "adb_tmp");
         androidHome.mkdirs(); tmp.mkdirs();
         String[] command = new String[args.length + 1]; command[0] = getAdbFile(context).getAbsolutePath(); System.arraycopy(args, 0, command, 1, args.length);
@@ -357,7 +395,7 @@ public final class AdbBootstrap {
         builder.environment().remove("ANDROID_ADB_SERVER_PORT");
         builder.environment().put("ADB_SERVER_SOCKET", "localfilesystem:" + getPrivateAdbSocketFile(context).getAbsolutePath());
         builder.environment().put("ADB_MDNS", "0"); builder.environment().put("ADB_MDNS_OPENSCREEN", "0");
-        return command(builder, timeout);
+        return builder;
     }
     private static ActivationFlow.Command command(ProcessBuilder builder, long timeout) {
         ActivationSession.Ticket ticket = WORKER.get();

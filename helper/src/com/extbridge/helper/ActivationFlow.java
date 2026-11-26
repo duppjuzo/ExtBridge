@@ -36,14 +36,19 @@ public final class ActivationFlow {
         }
         public boolean activated() { return outcome == Outcome.ACTIVATED; }
     }
+    public static final class StagedJar {
+        final String path, sha256;
+        public StagedJar(String path, String sha256) { this.path = path; this.sha256 = sha256; }
+    }
     public interface Environment {
         boolean cancelled();
         boolean adbAvailable();
+        Command startAdbServer();
         default boolean hostAllowed(String host) { return true; }
         Command adb(String... args);
         Command root(String script);
-        String script(String token, String stagedJar, boolean root);
-        String stagedJar();
+        String script(String token, String stagedJar, String sha256, boolean root);
+        StagedJar stagedJar();
         int discoverConnectPort();
         Probe probe();
         long now();
@@ -105,7 +110,7 @@ public final class ActivationFlow {
     }
     public static boolean owns(Probe probe, String token, int pid) {
         return probe != null && probe.connected && probe.handshake && probe.compatible && probe.pid == pid
-                && (probe.uid == 0 || probe.uid == 2000) && token.equals(probe.token);
+                && probe.uid == 2000 && token.equals(probe.token);
     }
     private static Result result(Outcome outcome, Stage stage, String message, String token, int pid) {
         return new Result(outcome, stage, message, token, pid);
@@ -134,7 +139,7 @@ public final class ActivationFlow {
             if (!root) {
                 if (!env.adbAvailable()) return result(Outcome.FAILED, stage, "内置 ADB 不可用", token, -1);
                 stage = Stage.ADB_SERVER; env.step(stage, "正在启动 ADB 通道…"); check(env);
-                Command server = env.adb("start-server"); check(env);
+                Command server = env.startAdbServer(); check(env);
                 if (server.code != 0) return result(Outcome.FAILED, stage, "ADB 通道启动失败", token, -1);
                 int port = request.connectPort;
                 if (pair) {
@@ -156,21 +161,24 @@ public final class ActivationFlow {
                 if (!connected(connection, address)) return result(Outcome.FAILED, stage, "无线调试连接失败", token, -1);
             }
             stage = Stage.DEPLOY; env.step(stage, "正在启动后台服务…"); check(env);
-            String staged = env.stagedJar();
+            StagedJar staged = env.stagedJar();
             String deviceJar = null;
             if (!root) {
                 // Push the staged jar directly so the deploy script never depends on
                 // pm path + unzip, which fails under MIUI 分身 / unopened security settings.
                 // Per-token name: no stale jar from a previous activation can be picked up.
                 deviceJar = "/data/local/tmp/extb_" + token + ".jar";
-                Command pushed = env.adb("-s", address, "push", staged, deviceJar); check(env);
+                Command pushed = env.adb("-s", address, "push", staged.path, deviceJar); check(env);
                 if (pushed.code != 0) return result(Outcome.FAILED, stage, "守护进程 JAR 传输失败", token, -1);
             }
-            String script = env.script(token, root ? staged : deviceJar, root); check(env);
+            String script = env.script(token, root ? staged.path : deviceJar, staged.sha256, root); check(env);
             Command launch = root ? env.root(script) : env.adb("-s", address, "shell", script); check(env);
             int pid = launchedPid(launch, token);
             if (pid < 0) return result(Outcome.FAILED, stage,
-                    launch.code == -3 ? "服务启动命令超时" : root && (launch.code == -2 || launch.output.contains("NO_ROOT")
+                    launch.output.contains("ERR_VERIFY_HELPER") ? "无法验证当前用户的官方应用签名，未替换原服务"
+                            : launch.output.contains("ERR_STAGE_HASH") ? "守护进程 JAR 校验失败，未替换原服务"
+                            : launch.output.contains("ERR_SHELL_ID") ? "无法以 shell 身份启动，已停止激活"
+                            : launch.code == -3 ? "服务启动命令超时" : root && (launch.code == -2 || launch.output.contains("NO_ROOT")
                             || launch.output.toLowerCase(Locale.ROOT).contains("denied")) ? "未获得可用的 Root 授权"
                             : "服务启动失败，请查看服务日志", token, -1);
             stage = Stage.VERIFY; env.step(stage, "正在验证本次启动的服务…");

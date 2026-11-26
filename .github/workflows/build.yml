@@ -154,6 +154,7 @@ jobs:
         run: |
           $env:EXTBRIDGE_KEYSTORE_PASS = if (-not [string]::IsNullOrWhiteSpace($env:KS_PASS_PRIMARY)) { $env:KS_PASS_PRIMARY } else { $env:KS_PASS_ALT }
           powershell -ExecutionPolicy Bypass -File .\build_v3.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $ver = $null
           if (Test-Path ".\helper\build.gradle.kts") {
             $kts = Get-Content -Raw -Path ".\helper\build.gradle.kts" -Encoding UTF8

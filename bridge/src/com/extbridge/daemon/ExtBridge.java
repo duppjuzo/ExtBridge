@@ -88,11 +88,11 @@ public class ExtBridge implements Runnable {
     private static final int PROBE_VERSION = 2;
     private static final int OWNED_SHUTDOWN_TRANSACTION = 0x455843;
     private static final String PROBE_DESCRIPTOR = "com.extbridge.daemon.ExtBridge";
-    // Official release signing certificate SHA-256 (same constant pinned in
-    // helper/build.gradle.kts): the daemon only serves a helper signed with it.
+    // Same release certificate enforced on the final APK by build_v3.ps1.
     private static final String EXPECTED_HELPER_CERT_SHA256 =
             "e4f67b3012a16633006c64bfc9d5a95c7bdda10826bd729777c2a3066f49117c";
     private static String sActivationToken = "";
+    private static int sHelperUser;
     private static int readDaemonEffectiveUid() {
         // Framework UID caches can retain 0 after a Root-launched process drops to shell.
         try (BufferedReader reader = new BufferedReader(new FileReader("/proc/self/status"))) {
@@ -244,34 +244,43 @@ public class ExtBridge implements Runnable {
     private static float sSavedBrightFloat = -1f;
 
     public static void main(String[] args) {
+        // Root deployers must switch identity before loading any daemon code.
+        if (android.system.Os.getuid() != 2000 || android.system.Os.geteuid() != 2000
+                || android.system.Os.getgid() != 2000 || android.system.Os.getegid() != 2000) {
+            System.err.println("EXTBRIDGE_REQUIRES_SHELL");
+            System.exit(12);
+            return;
+        }
         // BEGIN DAEMON_LIVENESS_PROBE
         if (args.length == 1 && "--verify".equals(args[0])) {
             System.out.println("EXTBRIDGE_JAR_OK:" + PROBE_VERSION);
             return;
         }
+        boolean verifyHelper = false;
         for (int i = 0; i < args.length; i++) {
             if ("--activation-token".equals(args[i]) && i + 1 < args.length) {
                 sActivationToken = args[++i];
-                if (!sActivationToken.matches("[a-zA-Z0-9_-]{16,80}")) return;
+                if (!sActivationToken.matches("[a-zA-Z0-9_-]{16,80}")) throw new IllegalArgumentException("Invalid activation token");
+            } else if ("--verify-helper".equals(args[i])) {
+                verifyHelper = true;
+            } else if ("--helper-user".equals(args[i]) && i + 1 < args.length) {
+                sHelperUser = Integer.parseInt(args[++i]);
+                if (sHelperUser < 0) throw new IllegalArgumentException("Invalid helper user");
             } else if ("--cancel-file".equals(args[i]) && i + 1 < args.length) {
                 if (new File(args[++i]).exists()) return;
-            }
+            } else throw new IllegalArgumentException("Unknown daemon option");
         }
         // END DAEMON_LIVENESS_PROBE
         try {
-            if (android.os.Process.myUid() == 0) {
-                try {
-                    android.system.Os.setgid(2000);
-                    android.system.Os.setuid(2000);
-                    System.out.println("EXTBRIDGE_ROOT_DROPPED_TO_SHELL uid=2000");
-                } catch (Throwable t) {
-                    System.err.println("drop root to shell warning: " + t);
-                }
-            }
             Looper.prepareMainLooper();
             Class<?> atCls = Class.forName("android.app.ActivityThread");
             Object at = atCls.getMethod("systemMain").invoke(null);
             Context sysCtx = (Context) atCls.getMethod("getSystemContext").invoke(at);
+            if (sHelperUser != 0) {
+                android.os.UserHandle user = android.os.UserHandle.getUserHandleForUid(Math.multiplyExact(sHelperUser, 100000));
+                sysCtx = (Context) Context.class.getMethod("createContextAsUser", android.os.UserHandle.class, int.class)
+                        .invoke(sysCtx, user, 0);
+            }
             try {
                 sCtx = sysCtx.createPackageContext("com.android.shell", Context.CONTEXT_IGNORE_SECURITY);
             } catch (Throwable t) {
@@ -279,13 +288,12 @@ public class ExtBridge implements Runnable {
                 sCtx = sysCtx;
             }
             sCtx = fixShellContext(sCtx);
-            // Only heal appops for the officially-signed helper; a repackaged app must not
-            // inherit these grants from a shell-privileged daemon.
-            if (getVerifiedHelperUid() > 0) {
-                try { runCmdOut("appops", "set", "com.extbridge.helper", "10021", "allow"); } catch (Throwable ignored) {}
-                try { runCmdOut("appops", "set", "com.extbridge.helper", "ACCESS_RESTRICTED_SETTINGS", "allow"); } catch (Throwable ignored) {}
-                try { runCmdOut("appops", "set", "com.extbridge.helper", "SYSTEM_ALERT_WINDOW", "allow"); } catch (Throwable ignored) {}
+            if (getVerifiedHelperUid() <= 0) {
+                System.err.println("EXTBRIDGE_UNTRUSTED_HELPER");
+                System.exit(3);
+                return;
             }
+            if (verifyHelper) { System.exit(0); return; } // preflight has no side effects
             sDm = (DisplayManager) sCtx.getSystemService(Context.DISPLAY_SERVICE);
             sIm = (InputManager) sCtx.getSystemService(Context.INPUT_SERVICE);
 
@@ -308,7 +316,6 @@ public class ExtBridge implements Runnable {
             try {
                 IntentFilter flt = new IntentFilter();
                 flt.addAction("com.extbridge.daemon.NEED_BINDER");
-                flt.addAction("com.extbridge.daemon.SHUTDOWN");
                 BroadcastReceiver needBinderRx = new BroadcastReceiver() {
                     @Override
                     public void onReceive(Context c, Intent i) {
@@ -323,10 +330,6 @@ public class ExtBridge implements Runnable {
                             if (now - sLastNeedBinderRxMs < 500L) return;
                             sLastNeedBinderRxMs = now;
                             enqueuePushBinderToHelper(false);
-                        } else if ("com.extbridge.daemon.SHUTDOWN".equals(act)) {
-                            sShuttingDown = true;
-                            cleanupDisplay(true);
-                            new Thread(() -> { SystemClock.sleep(80); System.exit(0); }).start();
                         }
                     }
                 };
@@ -1891,10 +1894,7 @@ public class ExtBridge implements Runnable {
             Intent intent = new Intent();
             intent.setComponent(new ComponentName(pkg, cls));
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
-            if ("com.extbridge.helper".equals(pkg) && sCtlBinder != null) {
-                Bundle b = new Bundle();
-                b.putBinder("cb", sCtlBinder);
-                intent.putExtras(b);
+            if ("com.extbridge.helper".equals(pkg)) {
                 intent.putExtra("extId", sVdId);
             }
             ActivityOptions opts = makeExtLaunchOptionsForMode(sVdId, mode);
@@ -2258,9 +2258,9 @@ public class ExtBridge implements Runnable {
                 Bundle opts = android.app.BroadcastOptions.makeBasic()
                         .setShareIdentityEnabled(true)
                         .toBundle();
-                sCtx.sendBroadcast(bi, "android.permission.INJECT_EVENTS", opts);
+                sCtx.sendBroadcast(bi, null, opts);
             } else {
-                sCtx.sendBroadcast(bi, "android.permission.INJECT_EVENTS");
+                sCtx.sendBroadcast(bi);
             }
         } catch (Throwable ignored) {}
     }
@@ -2328,7 +2328,7 @@ public class ExtBridge implements Runnable {
             am = Class.forName("android.app.IActivityManager$Stub").getMethod("asInterface", IBinder.class).invoke(null, amB);
             Object holder = am.getClass()
                     .getMethod("getContentProviderExternal", String.class, int.class, IBinder.class, String.class)
-                    .invoke(am, authority, 0, tok, "*extbridge*");
+                    .invoke(am, authority, sHelperUser, tok, "*extbridge*");
             if (holder == null) return null;
             Object prov = holder.getClass().getField("provider").get(holder);
             if (prov == null) return null;
@@ -2364,7 +2364,7 @@ public class ExtBridge implements Runnable {
             if (am != null) {
                 try {
                     am.getClass().getMethod("removeContentProviderExternalAsUser", String.class, IBinder.class, int.class)
-                            .invoke(am, authority, tok, 0);
+                            .invoke(am, authority, tok, sHelperUser);
                 } catch (Throwable ignored) {
                     try {
                         am.getClass().getMethod("removeContentProviderExternal", String.class, IBinder.class)
@@ -2404,11 +2404,6 @@ public class ExtBridge implements Runnable {
         try {
             Intent svc = new Intent();
             svc.setComponent(new ComponentName("com.extbridge.helper", "com.extbridge.helper.BridgeService"));
-            if (sCtlBinder != null) {
-                Bundle b = new Bundle();
-                b.putBinder("cb", sCtlBinder);
-                svc.putExtras(b);
-            }
             if (Build.VERSION.SDK_INT >= 26) {
                 sCtx.startForegroundService(svc);
             } else {
@@ -2471,7 +2466,7 @@ public class ExtBridge implements Runnable {
         try {
             PackageManager pm = sCtx.getPackageManager();
             int curUid = pm.getPackageUid("com.extbridge.helper", 0);
-            if (curUid <= 0) {
+            if (curUid <= 0 || curUid / 100000 != sHelperUser) {
                 sVerifiedHelperUid = -1;
                 return -1;
             }
@@ -3688,12 +3683,7 @@ public class ExtBridge implements Runnable {
             Intent intent = new Intent();
             intent.setComponent(new ComponentName("com.extbridge.helper", "com.extbridge.helper.LauncherActivity"));
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
-            if (sCtlBinder != null) {
-                Bundle b = new Bundle();
-                b.putBinder("cb", sCtlBinder);
-                intent.putExtras(b);
-                intent.putExtra("extId", sVdId);
-            }
+            intent.putExtra("extId", sVdId);
             ActivityOptions opts = ActivityOptions.makeBasic();
             opts.setLaunchDisplayId(sVdId);
             opts.setLaunchBounds(bounds);

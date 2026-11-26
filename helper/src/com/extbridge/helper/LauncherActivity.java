@@ -104,7 +104,7 @@ public class LauncherActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         mAppliedDensityDpi = getResources().getConfiguration().densityDpi;
-        extractBinder(getIntent());
+        if (BridgeClient.getService() == null) BridgeClient.requestBinder(this);
         BridgeService.ensureStarted(this);
         buildUi();
         if (!sPendingQuery.isEmpty() && mSearchInput != null) {
@@ -113,7 +113,8 @@ public class LauncherActivity extends Activity {
             mSearchInput.setText(mQuery);
         }
         try {
-            registerReceiver(mSyncRx, new IntentFilter("com.extbridge.helper.STATE_SYNC"), RECEIVER_EXPORTED);
+            registerReceiver(mSyncRx, new IntentFilter("com.extbridge.helper.STATE_SYNC"),
+                    "android.permission.INJECT_EVENTS", null, RECEIVER_EXPORTED);
         } catch (Throwable ignored) {}
         loadAppsAsync();
         loadWallpaperAsync(false);
@@ -160,14 +161,6 @@ public class LauncherActivity extends Activity {
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        extractBinder(intent);
-    }
-
-    private void extractBinder(Intent i) {
-        if (i != null && i.getExtras() != null) {
-            android.os.IBinder cb = i.getExtras().getBinder("cb");
-            if (cb != null) BridgeClient.setBinder(cb);
-        }
         if (BridgeClient.getService() == null) BridgeClient.requestBinder(this);
     }
 

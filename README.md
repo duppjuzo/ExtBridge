@@ -91,9 +91,9 @@
    - **OPPO / 一加 / 真我 (ColorOS)**：建议在开发者选项开启「禁止权限监控」；
    - **vivo / iQOO (OriginOS)**：建议在开发者选项开启「USB 模拟点击 / 允许模拟输入」。
 2. 选择 **本机无线调试通知栏填 6 位配对码**、**电脑 ADB 一键命令** 或 **Root 一键降权激活** 拉起守护进程。
-   - 电脑方式：先连接设备并允许 USB 调试，再在软件的激活页选择“电脑 ADB”，复制当前生成的命令到电脑终端执行。命令为明文单行（无 Base64 黑盒、不依赖随机 UUID 文件），在电脑端完成 JAR 提取、`--verify` 自检、旧实例清理与 `appops`/白名单授权，最终以 `EXTBRIDGE_PC_READY` 确认成功。
+   - 电脑方式：连接设备并允许 USB 调试，在激活页复制明文单行命令。它先通过 `--verify-helper` 校验已安装应用的官方签名，再替换旧服务并授权。`EXTBRIDGE_PC_READY` 表示本次启动的进程已存活，无需保持 App 界面打开；Binder 握手状态可在 App 中查看。
    - 电脑方式不要求 App 界面处于打开状态；成功判据是守护进程存活与自检通过，而非 `getDaemonStatus`。
-   - Root 方式以 `su 2000` 降权启动守护进程。
+   - Root 只负责读取 JAR（独立挂载命名空间下会从当前 Android 用户的 APK 回退提取）。接收端以 shell 身份校验 JAR 的 SHA-256 和应用签名，降权或校验失败就停止，不替换旧服务。
    - 配对完成不等于激活完成；以软件显示的验证结果为准。
 3. 插入 Type-C 显示器即可体验 **DeX 独立扩展桌面、自由分屏、一键黑屏省电与纯净原生镜像切换**。
 
@@ -108,7 +108,7 @@
 .\build_v3.ps1 -Configuration Debug
 ```
 
-脚本先构建 daemon JAR，再构建客户端。Debug APK 输出到 `build/out/exthelper.apk`，使用开发测试证书。
+脚本先构建 daemon JAR，再构建客户端。Debug APK 输出到 `build/out/exthelper.apk`，使用开发测试证书，可验证界面和部署失败路径，不能通过正式激活的签名校验。
 生成 daemon JAR 后，也可以通过 Gradle 构建并安装客户端：
 
 ```powershell
@@ -116,7 +116,7 @@
 ```
 
 新克隆项目或修改 `bridge/` 后，应先重新运行 `build_v3.ps1`；Gradle 不负责重新编译 daemon。
-默认 Release 构建保留 R8 与资源缩减，配置 `EXTBRIDGE_KEYSTORE`、`EXTBRIDGE_KEYSTORE_PASS` 时签名；
+默认 Release 构建保留 R8 与资源缩减，配置 `EXTBRIDGE_KEYSTORE`、`EXTBRIDGE_KEYSTORE_PASS` 时签名并核对最终 APK 的官方证书 SHA-256；
 未配置密钥时输出 `build/out/exthelper-unsigned.apk`，不会自动替换为 Debug 签名。
 `helper/build.gradle.kts` 的 `versionCode` 保持在主线正式版之下（当前 `26`，按评审要求 ≤27，主线现为 `29`），确保用户能从 Lite 覆盖安装回官方主线版本。
 `.github/workflows/build.yml` 已与主线同步：JDK 21 / `platforms;android-37.0` + `build-tools;37.0.0`、仓库身份保护、Release 仅限官方主仓触发，产物命名 `ExtBridge_v<version>[-unofficial-fork-<owner>].apk`。
