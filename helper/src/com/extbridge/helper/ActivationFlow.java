@@ -42,7 +42,8 @@ public final class ActivationFlow {
         default boolean hostAllowed(String host) { return true; }
         Command adb(String... args);
         Command root(String script);
-        String script(String token, boolean root);
+        String script(String token, String stagedJar, boolean root);
+        String stagedJar();
         int discoverConnectPort();
         Probe probe();
         long now();
@@ -155,7 +156,17 @@ public final class ActivationFlow {
                 if (!connected(connection, address)) return result(Outcome.FAILED, stage, "无线调试连接失败", token, -1);
             }
             stage = Stage.DEPLOY; env.step(stage, "正在启动后台服务…"); check(env);
-            String script = env.script(token, root); check(env);
+            String staged = env.stagedJar();
+            String deviceJar = null;
+            if (!root) {
+                // Push the staged jar directly so the deploy script never depends on
+                // pm path + unzip, which fails under MIUI 分身 / unopened security settings.
+                // Per-token name: no stale jar from a previous activation can be picked up.
+                deviceJar = "/data/local/tmp/extb_" + token + ".jar";
+                Command pushed = env.adb("-s", address, "push", staged, deviceJar); check(env);
+                if (pushed.code != 0) return result(Outcome.FAILED, stage, "守护进程 JAR 传输失败", token, -1);
+            }
+            String script = env.script(token, root ? staged : deviceJar, root); check(env);
             Command launch = root ? env.root(script) : env.adb("-s", address, "shell", script); check(env);
             int pid = launchedPid(launch, token);
             if (pid < 0) return result(Outcome.FAILED, stage,

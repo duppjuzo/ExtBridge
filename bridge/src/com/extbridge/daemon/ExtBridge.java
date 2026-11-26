@@ -10,8 +10,12 @@ import android.content.ContentProviderClient;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
+import android.content.pm.ProviderInfo;
 import android.content.pm.ResolveInfo;
+import android.content.pm.Signature;
+import android.content.pm.SigningInfo;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -33,7 +37,6 @@ import android.hardware.display.VirtualDisplay;
 import android.hardware.input.InputManager;
 import android.media.AudioDeviceInfo;
 import android.media.AudioManager;
-import android.net.Uri;
 import android.net.wifi.WifiManager;
 import android.os.BatteryManager;
 import android.os.Binder;
@@ -66,6 +69,7 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -74,6 +78,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class ExtBridge implements Runnable {
     // BEGIN DAEMON_LIVENESS_PROBE
@@ -82,6 +88,10 @@ public class ExtBridge implements Runnable {
     private static final int PROBE_VERSION = 2;
     private static final int OWNED_SHUTDOWN_TRANSACTION = 0x455843;
     private static final String PROBE_DESCRIPTOR = "com.extbridge.daemon.ExtBridge";
+    // Official release signing certificate SHA-256 (same constant pinned in
+    // helper/build.gradle.kts): the daemon only serves a helper signed with it.
+    private static final String EXPECTED_HELPER_CERT_SHA256 =
+            "e4f67b3012a16633006c64bfc9d5a95c7bdda10826bd729777c2a3066f49117c";
     private static String sActivationToken = "";
     private static int readDaemonEffectiveUid() {
         // Framework UID caches can retain 0 after a Root-launched process drops to shell.
@@ -113,6 +123,11 @@ public class ExtBridge implements Runnable {
     private static Handler sHandler;
     private static IBinder sCtlBinder;
     private static volatile IBinder sHelperProcToken;
+    private static final ExecutorService sBinderPushExec = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "ExtBinderPush");
+        t.setDaemon(true);
+        return t;
+    });
 
     private static Method sMInjectInput;
     private static Method sMSetDisplayId;
@@ -179,7 +194,10 @@ public class ExtBridge implements Runnable {
     private static final int SPLIT_GAP_PX = 8;
     private static volatile int sMirrorMode = 0;       // 0=DeX独立桌面, 1=纯净原生镜像
     private static volatile Object sMir0Sc;
-    private static volatile int sHelperUid = -1;
+    private static volatile int sVerifiedHelperUid = -1;
+    private static volatile long sLastHelperUidVerifyMs = 0L;
+    private static volatile long sLastNeedBinderRxMs = 0L;
+    private static volatile long sLastBinderPushAttemptMs = 0L;
 
     private static Class<?> sScCls;
     private static Class<?> sScBuilderCls;
@@ -261,8 +279,13 @@ public class ExtBridge implements Runnable {
                 sCtx = sysCtx;
             }
             sCtx = fixShellContext(sCtx);
-            try { runCmdOut("appops", "set", "com.extbridge.helper", "10021", "allow"); } catch (Throwable ignored) {}
-            try { runCmdOut("appops", "set", "com.extbridge.helper", "ACCESS_RESTRICTED_SETTINGS", "allow"); } catch (Throwable ignored) {}
+            // Only heal appops for the officially-signed helper; a repackaged app must not
+            // inherit these grants from a shell-privileged daemon.
+            if (getVerifiedHelperUid() > 0) {
+                try { runCmdOut("appops", "set", "com.extbridge.helper", "10021", "allow"); } catch (Throwable ignored) {}
+                try { runCmdOut("appops", "set", "com.extbridge.helper", "ACCESS_RESTRICTED_SETTINGS", "allow"); } catch (Throwable ignored) {}
+                try { runCmdOut("appops", "set", "com.extbridge.helper", "SYSTEM_ALERT_WINDOW", "allow"); } catch (Throwable ignored) {}
+            }
             sDm = (DisplayManager) sCtx.getSystemService(Context.DISPLAY_SERVICE);
             sIm = (InputManager) sCtx.getSystemService(Context.INPUT_SERVICE);
 
@@ -286,20 +309,44 @@ public class ExtBridge implements Runnable {
                 IntentFilter flt = new IntentFilter();
                 flt.addAction("com.extbridge.daemon.NEED_BINDER");
                 flt.addAction("com.extbridge.daemon.SHUTDOWN");
-                sCtx.registerReceiver(new BroadcastReceiver() {
+                BroadcastReceiver needBinderRx = new BroadcastReceiver() {
                     @Override
                     public void onReceive(Context c, Intent i) {
                         if (i == null) return;
                         String act = i.getAction();
                         if ("com.extbridge.daemon.NEED_BINDER".equals(act)) {
-                            pushBinderToHelper();
+                            if (Build.VERSION.SDK_INT >= 34) {
+                                int senderUid = getSentFromUid();
+                                if (!isTrustedCaller(senderUid)) return;
+                            }
+                            long now = SystemClock.uptimeMillis();
+                            if (now - sLastNeedBinderRxMs < 500L) return;
+                            sLastNeedBinderRxMs = now;
+                            enqueuePushBinderToHelper(false);
                         } else if ("com.extbridge.daemon.SHUTDOWN".equals(act)) {
                             sShuttingDown = true;
                             cleanupDisplay(true);
                             new Thread(() -> { SystemClock.sleep(80); System.exit(0); }).start();
                         }
                     }
-                }, flt, Context.RECEIVER_EXPORTED);
+                };
+                if (Build.VERSION.SDK_INT >= 33) {
+                    sCtx.registerReceiver(needBinderRx, flt, Context.RECEIVER_EXPORTED);
+                } else {
+                    sCtx.registerReceiver(needBinderRx, flt);
+                }
+                // The helper broadcasts NEED_BINDER to both the "android" and
+                // "com.android.shell" packages; register on the system context too so a
+                // package-targeted broadcast still reaches this process.
+                if (sCtx != sysCtx) {
+                    try {
+                        if (Build.VERSION.SDK_INT >= 33) {
+                            sysCtx.registerReceiver(needBinderRx, flt, Context.RECEIVER_EXPORTED);
+                        } else {
+                            sysCtx.registerReceiver(needBinderRx, flt);
+                        }
+                    } catch (Throwable ignored) {}
+                }
             } catch (Throwable ignored) {}
 
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
@@ -2192,29 +2239,66 @@ public class ExtBridge implements Runnable {
         return ok;
     }
 
-    private static void pushBinderToHelper() {
-        if (sCtx == null || sCtlBinder == null) return;
+    private static void enqueuePushBinderToHelper(boolean forceImmediate) {
+        long now = SystemClock.uptimeMillis();
+        if (!forceImmediate && (now - sLastBinderPushAttemptMs) < 700L) return;
+        sLastBinderPushAttemptMs = now;
+        sBinderPushExec.execute(ExtBridge::pushBinderToHelper);
+    }
+
+    /** Fallback channel when OEM ROM hooks block shell->app ContentProvider calls under Root/su. */
+    private static void sendBinderFallbackBroadcast(Bundle extras) {
+        if (sCtx == null || extras == null || getVerifiedHelperUid() <= 0) return;
+        try {
+            Intent bi = new Intent("com.extbridge.helper.BINDER_PUSH");
+            bi.setComponent(new ComponentName("com.extbridge.helper", "com.extbridge.helper.ControlReceiver"));
+            bi.addFlags(Intent.FLAG_RECEIVER_FOREGROUND | Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
+            bi.putExtras(extras);
+            if (Build.VERSION.SDK_INT >= 34) {
+                Bundle opts = android.app.BroadcastOptions.makeBasic()
+                        .setShareIdentityEnabled(true)
+                        .toBundle();
+                sCtx.sendBroadcast(bi, "android.permission.INJECT_EVENTS", opts);
+            } else {
+                sCtx.sendBroadcast(bi, "android.permission.INJECT_EVENTS");
+            }
+        } catch (Throwable ignored) {}
+    }
+
+    private static Bundle callHelperProvider(String method, Bundle extras) {
+        if (sCtx == null || method == null || !isVerifiedHelperProviderOwner()) return null;
         Bundle res = null;
+        try {
+            ContentProviderClient cpc = sCtx.getContentResolver()
+                    .acquireUnstableContentProviderClient("com.extbridge.helper.provider");
+            if (cpc != null) {
+                try {
+                    res = cpc.call(method, null, extras);
+                } finally {
+                    try { cpc.close(); } catch (Throwable ignored) {}
+                }
+            }
+        } catch (Throwable ignored) {}
+        if (res == null) {
+            try {
+                if (isVerifiedHelperProviderOwner()) {
+                    res = callProviderViaAm("com.extbridge.helper.provider", method, null, extras);
+                }
+            } catch (Throwable ignored) {}
+        }
+        return res;
+    }
+
+    private static void pushBinderToHelper() {
+        if (sCtx == null || sCtlBinder == null || sShuttingDown) return;
+        if (getVerifiedHelperUid() <= 0) return;
+        boolean providerDelivered = false;
         try {
             Bundle b = new Bundle();
             b.putBinder("cb", sCtlBinder);
-            try {
-                ContentProviderClient cpc = sCtx.getContentResolver().acquireUnstableContentProviderClient("com.extbridge.helper.provider");
-                if (cpc != null) {
-                    try {
-                        res = cpc.call("setBinder", null, b);
-                    } finally {
-                        try { cpc.close(); } catch (Throwable ignored) {}
-                    }
-                }
-                if (res == null) {
-                    res = sCtx.getContentResolver().call(Uri.parse("content://com.extbridge.helper.provider"), "setBinder", null, b);
-                }
-            } catch (Throwable ignored) {}
-            if (res == null || !res.getBoolean("ok", false)) {
-                res = callProviderViaAm("com.extbridge.helper.provider", "setBinder", null, b);
-            }
-            if (res != null) {
+            Bundle res = isVerifiedHelperProviderOwner() ? callHelperProvider("setBinder", b) : null;
+            if (res != null && res.getBoolean("ok", false)) {
+                providerDelivered = true;
                 IBinder tok = res.getBinder("proc");
                 if (tok != null && tok != sHelperProcToken) {
                     sHelperProcToken = tok;
@@ -2224,6 +2308,9 @@ public class ExtBridge implements Runnable {
                         }, 0);
                     } catch (Throwable ignored) {}
                 }
+            }
+            if (!providerDelivered) {
+                sendBinderFallbackBroadcast(b);
             }
         } catch (Throwable t) {
             System.err.println("pushBinderToHelper failed: " + t);
@@ -2313,6 +2400,7 @@ public class ExtBridge implements Runnable {
     }
 
     private static void startHelperService() {
+        if (getVerifiedHelperUid() <= 0) return;
         try {
             Intent svc = new Intent();
             svc.setComponent(new ComponentName("com.extbridge.helper", "com.extbridge.helper.BridgeService"));
@@ -2373,23 +2461,77 @@ public class ExtBridge implements Runnable {
         }
     }
 
+    /**
+     * Resolves the helper uid only when com.extbridge.helper is signed with the official
+     * release certificate (cached 5s). A repackaged / fork-signed helper is rejected, so a
+     * tampered app can never drive this shell-privileged daemon.
+     */
+    private static int getVerifiedHelperUid() {
+        if (sCtx == null) return -1;
+        try {
+            PackageManager pm = sCtx.getPackageManager();
+            int curUid = pm.getPackageUid("com.extbridge.helper", 0);
+            if (curUid <= 0) {
+                sVerifiedHelperUid = -1;
+                return -1;
+            }
+            long now = SystemClock.uptimeMillis();
+            if (curUid == sVerifiedHelperUid && (now - sLastHelperUidVerifyMs) < 5000L) {
+                return curUid;
+            }
+            PackageInfo pi = pm.getPackageInfo("com.extbridge.helper", PackageManager.GET_SIGNING_CERTIFICATES);
+            SigningInfo si = (pi != null) ? pi.signingInfo : null;
+            if (si == null || si.hasMultipleSigners()) {
+                sVerifiedHelperUid = -1;
+                return -1;
+            }
+            Signature[] sigs = si.getApkContentsSigners();
+            if (sigs == null || sigs.length != 1 || sigs[0] == null) {
+                sVerifiedHelperUid = -1;
+                return -1;
+            }
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(sigs[0].toByteArray());
+            StringBuilder hex = new StringBuilder(64);
+            for (byte b : digest) {
+                hex.append(String.format(Locale.US, "%02x", b & 0xff));
+            }
+            if (!EXPECTED_HELPER_CERT_SHA256.equalsIgnoreCase(hex.toString())) {
+                System.err.println("EXTBRIDGE_SECURITY_REJECT untrusted com.extbridge.helper cert=" + hex);
+                sVerifiedHelperUid = -1;
+                return -1;
+            }
+            sVerifiedHelperUid = curUid;
+            sLastHelperUidVerifyMs = now;
+            return curUid;
+        } catch (Throwable ignored) {
+            sVerifiedHelperUid = -1;
+            return -1;
+        }
+    }
+
+    private static boolean isVerifiedHelperProviderOwner() {
+        int helperUid = getVerifiedHelperUid();
+        if (helperUid <= 0 || sCtx == null) return false;
+        try {
+            ProviderInfo pi = sCtx.getPackageManager().resolveContentProvider("com.extbridge.helper.provider", 0);
+            return pi != null && pi.applicationInfo != null
+                    && pi.applicationInfo.uid == helperUid
+                    && "com.extbridge.helper".equals(pi.packageName);
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
     private static boolean isTrustedCaller(int callingUid) {
+        if (callingUid < 0) return false;
         if (callingUid == android.os.Process.myUid()
                 || callingUid == 0
                 || callingUid == 1000
                 || callingUid == 2000) {
             return true;
         }
-        int cached = sHelperUid;
-        if (cached > 0 && callingUid == cached) return true;
-        if (sCtx != null) {
-            try {
-                int uid = sCtx.getPackageManager().getPackageUid("com.extbridge.helper", 0);
-                sHelperUid = uid;
-                if (callingUid == uid) return true;
-            } catch (Throwable ignored) {}
-        }
-        return false;
+        int verifiedUid = getVerifiedHelperUid();
+        return verifiedUid > 0 && callingUid == verifiedUid;
     }
 
     private static class BridgeBinder extends Binder {

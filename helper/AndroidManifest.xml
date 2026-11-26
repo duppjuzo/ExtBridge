@@ -36,7 +36,7 @@
             android:exported="true"
             android:launchMode="singleTask"
             android:taskAffinity="com.extbridge.helper.tablet"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize">
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|uiMode">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -50,7 +50,7 @@
             android:launchMode="singleTask"
             android:taskAffinity="com.extbridge.helper.tablet"
             android:windowSoftInputMode="adjustResize|stateHidden"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden" />
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|uiMode" />
 
         <activity
             android:name=".LauncherActivity"
@@ -87,8 +87,10 @@
 
         <receiver
             android:name=".ControlReceiver"
-            android:exported="true">
+            android:exported="true"
+            android:permission="android.permission.INJECT_EVENTS">
             <intent-filter>
+                <action android:name="com.extbridge.helper.BINDER_PUSH" />
                 <action android:name="com.extbridge.helper.TOGGLE_INPUT" />
                 <action android:name="com.extbridge.helper.STATE_SYNC" />
                 <action android:name="com.extbridge.helper.REBUILD" />
@@ -100,6 +102,10 @@
                 <action android:name="com.extbridge.helper.EXIT_ALL" />
             </intent-filter>
         </receiver>
+
+        <receiver
+            android:name=".ControlReceiver$Internal"
+            android:exported="false" />
 
         <receiver
             android:name=".AdbPairingReceiver"

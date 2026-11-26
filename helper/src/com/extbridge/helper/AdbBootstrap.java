@@ -233,10 +233,39 @@ public final class AdbBootstrap {
         return fallback;
     }
     public static String buildPcAdbCommand() { return DaemonLaunchScript.pcCommand(); }
+    private static File getPrivateAdbSocketFile(Context context) {
+        File sockDir = new File(context.getCacheDir(), "asrv");
+        if (!sockDir.exists()) sockDir.mkdirs();
+        // 0700: only the app process can traverse this directory, so other
+        // networking apps on the device cannot reach the local adb server.
+        sockDir.setReadable(false, false);
+        sockDir.setReadable(true, true);
+        sockDir.setWritable(false, false);
+        sockDir.setWritable(true, true);
+        sockDir.setExecutable(false, false);
+        sockDir.setExecutable(true, true);
+        return new File(sockDir, "a.sock");
+    }
+
+    private static void stopLocalAdbServerSync(Context appCtx) {
+        if (appCtx == null) return;
+        if (isNativeAdbAvailable(appCtx)) {
+            try { runAdb(appCtx, 1500, "disconnect"); } catch (Throwable ignored) {}
+            try { runAdb(appCtx, 2500, "kill-server"); } catch (Throwable ignored) {}
+        }
+        // Always drop the socket file: a server left behind would keep the app-private
+        // 0700 unix socket alive for the next activation to collide with.
+        try {
+            File sockFile = getPrivateAdbSocketFile(appCtx);
+            if (sockFile.exists()) sockFile.delete();
+        } catch (Throwable ignored) {}
+    }
+
     private static File getAdbFile(Context context) { return new File(context.getApplicationInfo().nativeLibraryDir, "libadb.so"); }
     public static boolean isNativeAdbAvailable(Context context) { File file = getAdbFile(context); return file.isFile() && file.canExecute(); }
     public static boolean hasSuBinaryHint() {
-        for (String path : new String[]{"/system/bin/su", "/system/xbin/su", "/sbin/su", "/vendor/bin/su", "/debug_ramdisk/su"}) if (new File(path).exists()) return true;
+        for (String path : new String[]{"/system/bin/su", "/system/xbin/su", "/sbin/su", "/vendor/bin/su", "/debug_ramdisk/su",
+                "/data/adb/ksu/bin/su", "/data/adb/ap/bin/su", "/data/adb/modules/apatch/bin/su"}) if (new File(path).exists()) return true;
         return false;
     }
     public static ActivationSession.Ticket rootBootstrapAsync(Context context, boolean ignoredMarkAutoRoot, ProgressListener listener) {
@@ -265,36 +294,43 @@ public final class AdbBootstrap {
         File cancelFile = new File(app.getFilesDir(), "activation-cancel-" + ticket.token);
         ticket.onCancel(() -> invalidateLaunch(app, ticket, cancelFile));
         sExec.execute(() -> {
-            WORKER.set(ticket);
-            lastOutcome = "RUNNING"; lastStage = "VALIDATE"; lastMode = request.mode.name(); lastToken = ticket.token;
-            ActivationFlow.Result result = ActivationFlow.run(request, ticket.token, new ActivationFlow.Environment() {
-                public boolean cancelled() { return ticket.isCancelled() || BridgeService.sUserStopping || request.mode == ActivationSession.Mode.AUTO_ROOT && !isAutoRootEnabled(app); }
-                public boolean adbAvailable() { return isNativeAdbAvailable(app); }
-                public boolean hostAllowed(String host) { return localHost(host); }
-                public ActivationFlow.Command adb(String... args) { return runAdb(app, 18000, args); }
-                public ActivationFlow.Command root(String script) { return runSu(18000, script); }
-                public String script(String token, boolean root) { return DaemonLaunchScript.build(token, root ? stageBridgeJar(app, token) : null, root ? cancelFile.getAbsolutePath() : null, root); }
-                public int discoverConnectPort() { return getDiscoveryState().connectPort; }
-                public ActivationFlow.Probe probe() {
-                    BridgeClient.requestBinder(app); BridgeClient.Status status = BridgeClient.getStatus();
-                    return new ActivationFlow.Probe(status.connected, status.handshakeVerified, status.protocolCompatible,
-                            status.daemonPid, status.daemonUid, status.activationToken, status.connectionIssue);
-                }
-                public long now() { return SystemClock.elapsedRealtime(); }
-                public void pause(long time) { try { Thread.sleep(time); } catch (InterruptedException error) { ticket.cancel(); Thread.currentThread().interrupt(); } }
-                public void step(ActivationFlow.Stage stage, String message) { if (ticket.mayDeliver()) lastStage = stage.name(); if (listener != null) sMain.post(() -> { if (ticket.mayDeliver()) listener.onStep(message); }); }
-            });
-            if (result.outcome == ActivationFlow.Outcome.CANCELLED) ticket.cancel();
-            boolean rejectedLaunch = result.outcome == ActivationFlow.Outcome.FAILED
-                    && (result.stage == ActivationFlow.Stage.DEPLOY || result.stage == ActivationFlow.Stage.VERIFY);
-            if (rejectedLaunch) invalidateLaunch(app, ticket, cancelFile);
-            // A failed/abandoned launch may arrive after the local adb/su process
-            // returned. Revoke only this token, never an unrelated existing daemon.
-            if (ticket.isCancelled() || rejectedLaunch) BridgeClient.shutdownOwned(ticket.token);
-            if (ticket.sameGeneration()) { lastOutcome = result.outcome.name(); lastStage = result.stage.name(); }
-            ticket.finish(); WORKER.remove();
-            if (!ticket.isCancelled() && !rejectedLaunch) { cancelFile.delete(); new File(app.getFilesDir(), "extbridge-stage-" + ticket.token + ".jar").delete(); }
-            if (listener != null) sMain.post(() -> { if (ticket.mayDeliver()) listener.onActivationResult(result); });
+            try {
+                WORKER.set(ticket);
+                lastOutcome = "RUNNING"; lastStage = "VALIDATE"; lastMode = request.mode.name(); lastToken = ticket.token;
+                ActivationFlow.Result result = ActivationFlow.run(request, ticket.token, new ActivationFlow.Environment() {
+                    public boolean cancelled() { return ticket.isCancelled() || BridgeService.sUserStopping || request.mode == ActivationSession.Mode.AUTO_ROOT && !isAutoRootEnabled(app); }
+                    public boolean adbAvailable() { return isNativeAdbAvailable(app); }
+                    public boolean hostAllowed(String host) { return localHost(host); }
+                    public ActivationFlow.Command adb(String... args) { return runAdb(app, 18000, args); }
+                    public ActivationFlow.Command root(String script) { return runSu(18000, script); }
+                    public String script(String token, String stagedJar, boolean root) { return DaemonLaunchScript.build(token, stagedJar, root ? cancelFile.getAbsolutePath() : null, root); }
+                    public String stagedJar() { return stageBridgeJar(app, ticket.token); }
+                    public int discoverConnectPort() { return getDiscoveryState().connectPort; }
+                    public ActivationFlow.Probe probe() {
+                        BridgeClient.requestBinder(app); BridgeClient.Status status = BridgeClient.getStatus();
+                        return new ActivationFlow.Probe(status.connected, status.handshakeVerified, status.protocolCompatible,
+                                status.daemonPid, status.daemonUid, status.activationToken, status.connectionIssue);
+                    }
+                    public long now() { return SystemClock.elapsedRealtime(); }
+                    public void pause(long time) { try { Thread.sleep(time); } catch (InterruptedException error) { ticket.cancel(); Thread.currentThread().interrupt(); } }
+                    public void step(ActivationFlow.Stage stage, String message) { if (ticket.mayDeliver()) lastStage = stage.name(); if (listener != null) sMain.post(() -> { if (ticket.mayDeliver()) listener.onStep(message); }); }
+                });
+                if (result.outcome == ActivationFlow.Outcome.CANCELLED) ticket.cancel();
+                boolean rejectedLaunch = result.outcome == ActivationFlow.Outcome.FAILED
+                        && (result.stage == ActivationFlow.Stage.DEPLOY || result.stage == ActivationFlow.Stage.VERIFY);
+                if (rejectedLaunch) invalidateLaunch(app, ticket, cancelFile);
+                // A failed/abandoned launch may arrive after the local adb/su process
+                // returned. Revoke only this token, never an unrelated existing daemon.
+                if (ticket.isCancelled() || rejectedLaunch) BridgeClient.shutdownOwned(ticket.token);
+                if (ticket.sameGeneration()) { lastOutcome = result.outcome.name(); lastStage = result.stage.name(); }
+                ticket.finish(); WORKER.remove();
+                if (!ticket.isCancelled() && !rejectedLaunch) { cancelFile.delete(); new File(app.getFilesDir(), "extbridge-stage-" + ticket.token + ".jar").delete(); }
+                if (listener != null) sMain.post(() -> { if (ticket.mayDeliver()) listener.onActivationResult(result); });
+            } finally {
+                // Always tear down the local adb server once activation ends so no
+                // lingering server (and its private socket) survives the flow.
+                stopLocalAdbServerSync(app);
+            }
         });
         return ticket;
     }
@@ -315,7 +351,11 @@ public final class AdbBootstrap {
         String[] command = new String[args.length + 1]; command[0] = getAdbFile(context).getAbsolutePath(); System.arraycopy(args, 0, command, 1, args.length);
         ProcessBuilder builder = new ProcessBuilder(command).directory(home);
         builder.environment().put("HOME", home.getAbsolutePath()); builder.environment().put("ANDROID_USER_HOME", androidHome.getAbsolutePath());
-        builder.environment().put("TMPDIR", tmp.getAbsolutePath()); builder.environment().put("ANDROID_ADB_SERVER_PORT", "15037");
+        builder.environment().put("TMPDIR", tmp.getAbsolutePath());
+        // No TCP server port: keep the local adb server on the app-private 0700
+        // unix socket so other networking apps cannot connect and escalate.
+        builder.environment().remove("ANDROID_ADB_SERVER_PORT");
+        builder.environment().put("ADB_SERVER_SOCKET", "localfilesystem:" + getPrivateAdbSocketFile(context).getAbsolutePath());
         builder.environment().put("ADB_MDNS", "0"); builder.environment().put("ADB_MDNS_OPENSCREEN", "0");
         return command(builder, timeout);
     }

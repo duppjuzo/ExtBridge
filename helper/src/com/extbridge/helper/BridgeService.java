@@ -497,23 +497,25 @@ public class BridgeService extends Service {
         PendingIntent piTp = PendingIntent.getActivity(this, 2, tpIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE, optBundle0);
 
-        Intent toggleIntent = new Intent(this, ControlReceiver.class)
+        // Notification actions go through the non-exported ControlReceiver$Internal so they
+        // never require the exported receiver's android:permission="INJECT_EVENTS" guard.
+        Intent toggleIntent = new Intent(this, ControlReceiver.Internal.class)
                 .setAction("com.extbridge.helper.TOGGLE_INPUT");
         PendingIntent piToggle = PendingIntent.getBroadcast(this, 3, toggleIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
-        Intent extHomeIntent = new Intent(this, ControlReceiver.class)
+        Intent extHomeIntent = new Intent(this, ControlReceiver.Internal.class)
                 .setAction("com.extbridge.helper.LAUNCH_EXT_HOME");
         PendingIntent piExtHome = PendingIntent.getBroadcast(this, 4, extHomeIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
-        Intent mirrorIntent = new Intent(this, ControlReceiver.class)
+        Intent mirrorIntent = new Intent(this, ControlReceiver.Internal.class)
                 .setAction("com.extbridge.helper.TOGGLE_MIRROR")
                 .putExtra("mode", 0);
         PendingIntent piMirror = PendingIntent.getBroadcast(this, 5, mirrorIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
-        Intent exitIntent = new Intent(this, ControlReceiver.class)
+        Intent exitIntent = new Intent(this, ControlReceiver.Internal.class)
                 .setAction(ACTION_EXIT_ALL);
         PendingIntent piExit = PendingIntent.getBroadcast(this, 6, exitIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
