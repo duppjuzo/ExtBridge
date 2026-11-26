@@ -6,6 +6,9 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.drawable.Drawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -20,7 +23,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ScrollState
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
@@ -32,7 +37,10 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.painterResource
@@ -175,7 +183,7 @@ class MainActivity : ComponentActivity() {
         if (notif && devGate) sendPairNotification()
     }
 
-    private data class AppRule(val pkg: String, val label: String, val mode: Int)
+    private data class AppRule(val pkg: String, val label: String, val mode: Int, val icon: ImageBitmap? = null)
     private val onboarding get() = getSharedPreferences("extbridge_onboarding", MODE_PRIVATE)
     private val readyCallback = Runnable { handler.post { refresh() } }
     private val binderRePoke: Runnable = Runnable {
@@ -454,7 +462,11 @@ class MainActivity : ComponentActivity() {
                 packageManager.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0)
                     .filter { it.activityInfo != null && it.activityInfo.packageName != packageName }
                     .distinctBy { it.activityInfo.packageName }
-                    .map { AppRule(it.activityInfo.packageName, it.loadLabel(packageManager).toString(), modes[it.activityInfo.packageName] ?: 0) }
+                    .map { info ->
+                        val pkg = info.activityInfo.packageName
+                        val iconBmp = runCatching { drawableToImageBitmap(info.loadIcon(packageManager), 88) }.getOrNull()
+                        AppRule(pkg, info.loadLabel(packageManager).toString(), modes[pkg] ?: 0, iconBmp)
+                    }
                     .sortedWith(compareBy<AppRule> { it.mode == 0 }.thenBy { it.label.lowercase(Locale.ROOT) })
             }
             handler.post {
@@ -467,6 +479,20 @@ class MainActivity : ComponentActivity() {
                     }
             }
         }
+    }
+
+    /** Rasterizes a launcher icon for the per-app rule list (bounded to maxPx on the long side). */
+    private fun drawableToImageBitmap(d: Drawable?, maxPx: Int): ImageBitmap? {
+        if (d == null) return null
+        return runCatching {
+            val w = d.intrinsicWidth.takeIf { it > 0 }?.coerceAtMost(maxPx) ?: maxPx
+            val h = d.intrinsicHeight.takeIf { it > 0 }?.coerceAtMost(maxPx) ?: maxPx
+            val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(bmp)
+            d.setBounds(0, 0, w, h)
+            d.draw(canvas)
+            bmp.asImageBitmap()
+        }.getOrNull()
     }
 
     @Composable
@@ -1065,7 +1091,26 @@ class MainActivity : ComponentActivity() {
                     rulesError.isNotBlank() && rules.isEmpty() -> Unit
                     filtered.isEmpty() -> item(key = "empty") { Text("未找到匹配的应用") }
                     else -> items(filtered, key = { it.pkg }) { rule -> Card {
-                        ArrowPreference(title = rule.label, summary = "${BridgeClient.appModeLabel(rule.mode)}\n${rule.pkg}", onClick = { picked = rule })
+                        ArrowPreference(title = rule.label, summary = "${BridgeClient.appModeLabel(rule.mode)}\n${rule.pkg}", onClick = { picked = rule },
+                            startAction = {
+                                val icon = rule.icon
+                                if (icon != null) {
+                                    Image(
+                                        bitmap = icon,
+                                        contentDescription = rule.label,
+                                        modifier = Modifier
+                                            .size(38.dp)
+                                            .clip(RoundedCornerShape(10.dp)),
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = MiuixIcons.Regular.ListView,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(20.dp).padding(end = 12.dp),
+                                        tint = MiuixTheme.colorScheme.onSurfaceVariantActions,
+                                    )
+                                }
+                            })
                     } }
                 }
             }
