@@ -8,7 +8,7 @@ public final class DaemonLaunchScript {
     private static final String LIVE = TMP + "extbridge.jar";
     private static final String LOG = TMP + "extbridge.log";
     private static final String APP_PROCESS = "/system/bin/app_process";
-    private static final String RUNCON = "runcon u:r:shell:s0 " + APP_PROCESS;
+    private static final String SHELL_DOMAIN = "u:r:shell:s0";
     private static final String MAIN_ARGS = " /data/local/tmp com.extbridge.daemon.ExtBridge";
     private static final String PROCESS = "^(/system/bin/)?app_process /data/local/tmp com[.]extbridge[.]daemon[.]ExtBridge";
     private static final String SHELL_ID = "[ \"$(id -u):$(id -g)\" = 2000:2000 ]";
@@ -67,11 +67,6 @@ public final class DaemonLaunchScript {
         String dir = TMP + "extbridge." + token;
         String jar = dir + "/daemon.jar";
         String staged = quote(stagedJar);
-        String checkedLauncher = root
-                ? "set -- " + APP_PROCESS + "; case \"$(id -Z 2>/dev/null)\" in *:shell:*) ;; *) if " + verify(jar, user, RUNCON)
-                    + " >/dev/null 2>&1; then set -- " + RUNCON + "; fi;; esac; "
-                : "";
-        String verify = root ? "{ [ \"$#\" -gt 1 ] || " + verify(jar, user, APP_PROCESS) + "; }" : verify(jar, user, APP_PROCESS);
         String cleanup = (root ? "if [ -n \"$PID\" ]; then kill \"$PID\" 2>/dev/null; fi; " : "")
                 + "rm -f " + jar + (root ? "" : " " + staged) + "; rmdir " + dir;
         String deploy = SHELL_ID + " || { echo ERR_SHELL_ID; exit 12; }; "
@@ -79,10 +74,10 @@ public final class DaemonLaunchScript {
                 + (root ? "PID=; " : "") + "trap " + quote(cleanup) + " EXIT; "
                 + (root ? "head -c " + rootJarBytes : "cat " + staged) + " > " + jar + " && chmod 444 " + jar + " || exit 21; "
                 + "[ \"$(sha256sum " + jar + " | cut -d' ' -f1)\" = " + sha256 + " ] || { echo ERR_STAGE_HASH; exit 21; }; "
-                + checkedLauncher + verify + " || { echo ERR_VERIFY_HELPER; exit 21; }; "
+                + verify(jar, user, APP_PROCESS) + " || { case $? in 12) echo ERR_SHELL_ID; exit 12;; *) echo ERR_VERIFY_HELPER; exit 21;; esac; }; "
                 + (root ? awaitApproval(rootReady(token)) : "")
                 + "{ " + replaceAndGrant(jar, user, token) + "; } </dev/null || exit 22; "
-                + start(token, user, root ? "\"$@\"" : APP_PROCESS) + " & PID=$!; sleep 0.6; "
+                + start(token, user, APP_PROCESS) + " & PID=$!; sleep 0.6; "
                 + "kill -0 \"$PID\" 2>/dev/null || { echo EXTBRIDGE_LAUNCH_FAILED; exit 24; }; "
                 + (root ? awaitApproval(rootStarted(token)) : "")
                 + "echo EXTBRIDGE_LAUNCH:" + token + ":$PID; PID=";
@@ -101,24 +96,29 @@ public final class DaemonLaunchScript {
         // path needs to be readable as UID 2000. EOF denies both gates, even without Binder.
         String relay = "{ supply_jar || exit 21; for gate in replace keep; do "
                 + "IFS= read -r -t 22 approval || break; printf '%s\\n' \"$approval\" || break; done; }";
-        return supply + asShell(su, relay + " | \"$@\" " + quote(deploy));
+        return supply + asShell(su, relay + " | ", deploy);
     }
 
-    private static String asShell(String su, String command) {
+    private static String asShell(String su, String stdin, String command) {
         String binary = quote(su);
+        String inDomain = "[ \"$(id -Z 2>/dev/null)\" = " + SHELL_DOMAIN + " ]";
+        // Check from inside the selected shell, before it reads the JAR or touches a running service.
+        String guarded = inDomain + " || { echo ERR_SHELL_DOMAIN; exit 12; }; " + command;
+        String enter = "set -- /system/bin/sh -c " + quote(guarded) + "; if " + inDomain + "; then exec \"$@\"; fi; "
+                + "runcon " + SHELL_DOMAIN + " \"$@\"; rc=$?; case $rc in 1|126|127) echo ERR_SHELL_DOMAIN; exit 12;; esac; exit $rc";
         // Select a working su form before any mutation. Never retry a partially completed
         // transaction or let the root shell load the daemon.
         return "[ \"$(id -u)\" = 0 ] || { echo NO_ROOT; exit 12; }; "
                 + "for form in uid name sh; do case $form in uid) set -- " + binary + " 2000 -c;; name) set -- " + binary
                 + " shell -c;; sh) set -- " + binary + " 2000 /system/bin/sh -c;; esac; "
                 + "\"$@\" " + quote(SHELL_ID) + " </dev/null 2>/dev/null || continue; "
-                + command + "; exit $?; done; echo ERR_SHELL_ID; exit 12";
+                + stdin + "\"$@\" " + quote(enter) + "; exit $?; done; echo ERR_SHELL_ID; exit 12";
     }
 
     public static String stopOwnedRoot(String token, int user, String su) {
         checkIdentity(token, user);
         String stop = SHELL_ID + " && pkill -f " + quote(PROCESS + daemonOptions(token, user) + "$");
-        return asShell(su, "\"$@\" " + quote(stop));
+        return asShell(su, "", stop);
     }
 
     /** No host-shell interpolation: can be pasted into PowerShell, cmd.exe or a POSIX shell. */

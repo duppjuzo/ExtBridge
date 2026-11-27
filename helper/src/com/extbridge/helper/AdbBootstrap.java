@@ -343,6 +343,16 @@ public final class AdbBootstrap {
                     public ActivationFlow.Command startAdbServer() { return server.start(ticket); }
                     public boolean hostAllowed(String host) { return localHost(host); }
                     public ActivationFlow.Command adb(String... args) { return runAdb(app, 18000, args); }
+                    public ActivationFlow.Command adbWithInput(String file, String... args) {
+                        return command(adbBuilder(app, args).redirectInput(new File(file)), 18000);
+                    }
+                    public void removeRemoteJar(String address, String path) {
+                        try {
+                            ProcessBuilder cleanup = adbBuilder(app, "-s", address, "shell", "rm -f " + DaemonLaunchScript.quote(path));
+                            // Release this ticket's file even when normal commands are already cancelled.
+                            command(cleanup, 2500, false, null, null);
+                        } catch (RuntimeException error) { Log.w(TAG, "Remote stage cleanup unavailable", error); }
+                    }
                     public ActivationFlow.Command root(String script) { return runSu(su, 28000, script, rootGate); }
                     public String script(String token, String stagedJar, String sha256, boolean root) {
                         return DaemonLaunchScript.build(token, stagedJar, sha256, user, root ? new File(stagedJar).length() : 0, root ? su : null);
@@ -429,7 +439,7 @@ public final class AdbBootstrap {
     }
 
     private static ActivationFlow.Command runSu(String su, long timeout, String script, RootLaunchGate gate) {
-        return command(new ProcessBuilder(su, "-c", script), timeout, true, gate);
+        return command(new ProcessBuilder(su, "-c", script), timeout, true, gate, WORKER.get());
     }
     private static ActivationFlow.Command runAdb(Context context, long timeout, String... args) {
         try { return command(adbBuilder(context, args), timeout); }
@@ -450,15 +460,15 @@ public final class AdbBootstrap {
         return builder;
     }
     private static ActivationFlow.Command command(ProcessBuilder builder, long timeout) {
-        return command(builder, timeout, false, null);
+        return command(builder, timeout, false, null, WORKER.get());
     }
 
     private static void closeQuietly(OutputStream output) {
         try { output.close(); } catch (IOException ignored) {}
     }
 
-    private static ActivationFlow.Command command(ProcessBuilder builder, long timeout, boolean root, RootLaunchGate gate) {
-        ActivationSession.Ticket ticket = WORKER.get();
+    private static ActivationFlow.Command command(ProcessBuilder builder, long timeout, boolean root, RootLaunchGate gate,
+                                                  ActivationSession.Ticket ticket) {
         if (activationCancelled(ticket)) return new ActivationFlow.Command(125, "CANCELLED");
         Process process = null;
         try {

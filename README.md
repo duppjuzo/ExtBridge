@@ -29,10 +29,10 @@
 
 ### 4. 🛡️ 专为多品牌 Android 系统优化的兼容性设计
 - **零副屏 / 零边缘抢焦点开销**：完全去除第二虚拟屏 `sSideVd`、`IInputManager.getCursorPositionInLogicalDisplay` 轮询、透明 `PointerCapture` 捕获页、`IAppWidgetService` 反射授权及周期性 `dumpsys audio/media_session` 调用。
-- **跨 Android 11–16 方法签名自适应 + CLI 兜底**：`IActivityTaskManager.startActivity` 自动兼容 10 参数（Android 11）与 11 参数（Android 12–16）签名，并在深度魔改 ROM 上自动回退 `am start --display` 命令。
+- **分身与多用户桌面启动**：`IActivityTaskManager.startActivityAsUser` 显式指定激活应用所在的 Android 用户；系统接口不兼容时，`am start --user` 回退也使用同一用户。
 - **分品牌权限智能提示**：当输入注入被系统拦截 (`INJECT_EVENTS`) 时，自动识别品牌提示对应开关（如小米/REDMI「USB 调试（安全设置）」、OPPO/一加/真我 ColorOS「禁止权限监控」、vivo/iQOO「USB 模拟点击」）。
 - **激活链路安全加固**：内置 adb 服务只监听应用私有 `0700` Unix Socket（不再暴露本机 TCP 端口），激活结束即在 `finally` 中 `kill-server`；守护进程对 `com.extbridge.helper` 做官方签名证书指纹校验（`getVerifiedHelperUid`），`ControlReceiver` 仅接受持有 `INJECT_EVENTS` 签名权限的调用方；小米必需的 `appops 10021` 与 `deviceidle whitelist` 由部署脚本自动补齐。
-- **小米分身 / 未开安全设置下的部署可靠性**：无线调试改为 `adb push` 直传 JAR，APK 内 `assets/extbridge.jar` 以 `noCompress` 原样存储，并在构建期做 d8 ZIP 头归一化，避免 `pm path` + `unzip` 在受限 ROM 上失败。
+- **小米分身 / 未开安全设置下的部署可靠性**：无线调试优先 `adb push`，失败时通过同一已配对连接流式传输 JAR，两条路径都校验 SHA-256。取消或失败时会在关闭连接前尝试清理本次上传的临时文件。APK 内 JAR 不压缩，并在构建期归一化 d8 ZIP 头。
 
 ---
 
@@ -93,7 +93,7 @@
 2. 选择 **本机无线调试通知栏填 6 位配对码**、**电脑 ADB 一键命令** 或 **Root 一键降权激活** 拉起守护进程。
    - 电脑方式：连接设备并允许 USB 调试，在激活页复制明文单行命令。它先通过 `--verify-helper` 校验已安装应用的官方签名，再替换旧服务并授权。`EXTBRIDGE_PC_READY` 表示本次启动的进程已存活，无需保持 App 界面打开；Binder 握手状态可在 App 中查看。
    - `getDaemonStatus` 是独立诊断接口。若尚未确认连接（如 App 进程刚重启），返回 `connection_state=UNKNOWN` 并请求重新交付 Binder；此时旧字段 `connected=false` 不代表守护进程已停止。
-   - Root 只负责读取 JAR（独立挂载命名空间下会从已安装的 APK 回退提取）。接收端以 shell 身份校验 JAR 的 SHA-256 和应用签名；App 通过进程管道分别批准替换旧服务、保留新进程。取消发生在批准替换前时会保留旧服务；批准替换后取消只会清理本次启动的新进程。
+   - Root 只负责读取 JAR（独立挂载命名空间下会从已安装的 APK 回退提取）。部署前必须确认 UID/GID 为 2000 且 SELinux 域为 `u:r:shell:s0`；无法确认时保留旧服务。接收端校验 JAR 的 SHA-256 和应用签名，守护进程启动时再次检查自身身份。App 通过管道分别批准替换旧服务、保留新进程。
    - 配对完成不等于激活完成；以软件显示的验证结果为准。
 3. 插入 Type-C 显示器即可体验 **DeX 独立扩展桌面、自由分屏、一键黑屏省电与纯净原生镜像切换**。
 
@@ -120,6 +120,12 @@
 未配置密钥时输出 `build/out/exthelper-unsigned.apk`，不会自动替换为 Debug 签名。
 `helper/build.gradle.kts` 的 `versionCode` 保持在主线正式版之下（当前 `26`，按评审要求 ≤27，主线现为 `29`），确保用户能从 Lite 覆盖安装回官方主线版本。
 `.github/workflows/build.yml` 已与主线同步：JDK 21 / `platforms;android-37.0` + `build-tools;37.0.0`、仓库身份保护、Release 仅限官方主仓触发，产物命名 `ExtBridge_v<version>[-unofficial-fork-<owner>].apk`。
+
+激活回归测试在电脑上运行，无需连接设备。配置上述 SDK，并将 `java`、`javac`、Python 3 和 Bash 加入 PATH 后执行：
+
+```powershell
+python -B -m unittest discover -s tests -p "*_test.py" -v
+```
 
 ---
 

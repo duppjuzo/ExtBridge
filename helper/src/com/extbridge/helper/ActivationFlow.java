@@ -46,6 +46,8 @@ public final class ActivationFlow {
         Command startAdbServer();
         default boolean hostAllowed(String host) { return true; }
         Command adb(String... args);
+        Command adbWithInput(String file, String... args);
+        void removeRemoteJar(String address, String path);
         Command root(String script);
         String script(String token, String stagedJar, String sha256, boolean root);
         StagedJar stagedJar();
@@ -162,21 +164,36 @@ public final class ActivationFlow {
             }
             stage = Stage.DEPLOY; env.step(stage, "正在启动后台服务…"); check(env);
             StagedJar staged = env.stagedJar();
-            String deviceJar = null;
-            if (!root) {
-                // Push the staged jar directly so the deploy script never depends on
-                // pm path + unzip, which fails under MIUI 分身 / unopened security settings.
-                // Per-token name: no stale jar from a previous activation can be picked up.
-                deviceJar = "/data/local/tmp/extb_" + token + ".jar";
-                Command pushed = env.adb("-s", address, "push", staged.path, deviceJar); check(env);
-                if (pushed.code != 0) return result(Outcome.FAILED, stage, "守护进程 JAR 传输失败", token, -1);
+            Command launch;
+            if (root) {
+                String script = env.script(token, staged.path, staged.sha256, true); check(env);
+                launch = env.root(script);
+            } else {
+                if (!token.matches("[a-zA-Z0-9_-]{16,80}")) throw new IllegalArgumentException("Invalid activation token");
+                String deviceJar = "/data/local/tmp/extb_" + token + ".jar";
+                try {
+                    check(env);
+                    Command pushed = env.adb("-s", address, "push", staged.path, deviceJar); check(env);
+                    if (pushed.code != 0) {
+                        // Same paired transport and SHA-256 preflight; no PTY may transform the JAR bytes.
+                        String dst = DaemonLaunchScript.quote(deviceJar);
+                        Command streamed = env.adbWithInput(staged.path, "-s", address, "shell", "-T",
+                                "umask 077; rm -f " + dst + " && set -C && cat > " + dst); check(env);
+                        if (streamed.code != 0) return result(Outcome.FAILED, stage, "守护进程 JAR 传输失败", token, -1);
+                    }
+                    String script = env.script(token, deviceJar, staged.sha256, false); check(env);
+                    launch = env.adb("-s", address, "shell", script);
+                } finally {
+                    // A partial push, or cancellation before the device-side trap, still owns this file.
+                    env.removeRemoteJar(address, deviceJar);
+                }
             }
-            String script = env.script(token, root ? staged.path : deviceJar, staged.sha256, root); check(env);
-            Command launch = root ? env.root(script) : env.adb("-s", address, "shell", script); check(env);
+            check(env);
             int pid = launchedPid(launch, token);
             if (pid < 0) return result(Outcome.FAILED, stage,
                     launch.output.contains("ERR_VERIFY_HELPER") ? "无法验证当前用户的官方应用签名，未替换原服务"
                             : launch.output.contains("ERR_STAGE_HASH") ? "守护进程 JAR 校验失败，未替换原服务"
+                            : launch.output.contains("ERR_SHELL_DOMAIN") ? "无法切换到 shell 安全域，未替换原服务"
                             : launch.output.contains("ERR_SHELL_ID") ? "无法以 shell 身份启动，已停止激活"
                             : launch.code == -3 ? "服务启动命令超时" : root && (launch.code == -2 || launch.output.contains("NO_ROOT")
                             || launch.output.toLowerCase(Locale.ROOT).contains("denied")) ? "未获得可用的 Root 授权"

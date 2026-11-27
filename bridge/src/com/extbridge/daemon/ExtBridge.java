@@ -64,6 +64,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileReader;
 import java.io.FileWriter;
+import java.io.IOException;
 import java.io.InputStreamReader;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
@@ -72,6 +73,7 @@ import java.lang.reflect.Method;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -136,7 +138,7 @@ public class ExtBridge implements Runnable {
     private static Method sMRemAssoc;
     private static Method sMReplaceContent;
     private static Method sMMirrorDisplay;
-    private static Method sMStartActivity;
+    private static Method sMStartActivityAsUser;
     private static Method sMSetUserPreferredMode;
     private static Object sSetUserPreferredTarget;
     private static int sSetUserPreferredArgCount = 0;
@@ -243,10 +245,19 @@ public class ExtBridge implements Runnable {
     private static int sSavedBrightInt = 100;
     private static float sSavedBrightFloat = -1f;
 
+    private static boolean inShellDomain() {
+        try (BufferedReader reader = new BufferedReader(new FileReader("/proc/self/attr/current"))) {
+            String context = reader.readLine(); // procfs may include a trailing NUL
+            return context != null && "u:r:shell:s0".equals(context.trim());
+        } catch (IOException | SecurityException e) {
+            return false;
+        }
+    }
+
     public static void main(String[] args) {
         // Root deployers must switch identity before loading any daemon code.
         if (android.system.Os.getuid() != 2000 || android.system.Os.geteuid() != 2000
-                || android.system.Os.getgid() != 2000 || android.system.Os.getegid() != 2000) {
+                || android.system.Os.getgid() != 2000 || android.system.Os.getegid() != 2000 || !inShellDomain()) {
             System.err.println("EXTBRIDGE_REQUIRES_SHELL");
             System.exit(12);
             return;
@@ -396,55 +407,53 @@ public class ExtBridge implements Runnable {
             }
         } catch (Throwable ignored) {}
         try {
-            Method fallback10 = null;
-            for (Method m : sAtm.getClass().getMethods()) {
-                if (!m.getName().equals("startActivity")) continue;
-                int pc = m.getParameterCount();
-                if (pc == 11) {
-                    sMStartActivity = m;
-                    break;
-                } else if (pc == 10 && fallback10 == null) {
-                    fallback10 = m;
-                }
-            }
-            if (sMStartActivity == null) {
-                sMStartActivity = fallback10;
-            }
+            // Resolve on the AIDL interface: its generated Binder proxy may be non-public.
+            sMStartActivityAsUser = UserActivityStart.resolve(Class.forName("android.app.IActivityTaskManager"));
         } catch (Throwable ignored) {}
         initUserPreferredModeReflection();
         initSurfaceReflection();
     }
 
+    static final class UserActivityStart {
+        static Method resolve(Class<?> atm) {
+            Method legacy = null;
+            for (Method m : atm.getMethods()) {
+                if (!m.getName().equals("startActivityAsUser") || m.getReturnType() != int.class) continue;
+                Class<?>[] p = m.getParameterTypes();
+                int n = p.length;
+                if ((n != 11 && n != 12) || p[n - 1] != int.class || p[n - 2] != Bundle.class
+                        || p[n == 12 ? 3 : 2] != Intent.class) continue;
+                if (n == 12 && p[2] == String.class) return m;
+                if (n == 11) legacy = m;
+            }
+            return legacy;
+        }
+
+        static boolean invoke(Method method, Object atm, Intent intent, Bundle options, int user) throws ReflectiveOperationException {
+            Object rc = method.getParameterCount() == 11
+                    ? method.invoke(atm, null, "com.android.shell", intent, null, null, null, 0, 0, null, options, user)
+                    : method.invoke(atm, null, "com.android.shell", null, intent, null, null, null, 0, 0, null, options, user);
+            return (Integer) rc >= 0;
+        }
+
+        static ArrayList<String> amCommand(int user, int displayId, int windowingMode) {
+            ArrayList<String> cmd = new ArrayList<>(Arrays.asList("am", "start", "--user", String.valueOf(user)));
+            if (displayId >= 0) Collections.addAll(cmd, "--display", String.valueOf(displayId));
+            if (windowingMode > 0) Collections.addAll(cmd, "--windowingMode", String.valueOf(windowingMode));
+            return cmd;
+        }
+    }
+
     private static boolean invokeAtmStartActivity(Intent intent, Bundle optsBundle, int displayId, int windowingMode) {
         if (intent == null) return false;
-        if (sAtm != null && sMStartActivity != null) {
+        if (sMStartActivityAsUser != null) {
             try {
-                Object rc;
-                if (sMStartActivity.getParameterCount() == 10) {
-                    rc = sMStartActivity.invoke(sAtm, null, "com.android.shell", intent, null, null, null, 0, 0, null, optsBundle);
-                } else {
-                    rc = sMStartActivity.invoke(sAtm, null, "com.android.shell", null, intent, null, null, null, 0, 0, null, optsBundle);
-                }
-                return !(rc instanceof Integer) || (Integer) rc >= 0;
-            } catch (Throwable t) {
-                t.printStackTrace();
-            }
+                return UserActivityStart.invoke(sMStartActivityAsUser, sAtm, intent, optsBundle, sHelperUser);
+            } catch (ReflectiveOperationException | IllegalArgumentException e) { e.printStackTrace(); }
         }
         // Universal Android 11-16 CLI fallback for custom OEM IActivityTaskManager signatures
         try {
-            ArrayList<String> cmd = new ArrayList<>();
-            cmd.add("am");
-            cmd.add("start");
-            cmd.add("--user");
-            cmd.add("0");
-            if (displayId >= 0) {
-                cmd.add("--display");
-                cmd.add(String.valueOf(displayId));
-            }
-            if (windowingMode > 0) {
-                cmd.add("--windowingMode");
-                cmd.add(String.valueOf(windowingMode));
-            }
+            ArrayList<String> cmd = UserActivityStart.amCommand(sHelperUser, displayId, windowingMode);
             ComponentName cn = intent.getComponent();
             if (cn != null) {
                 cmd.add("-n");
@@ -459,8 +468,8 @@ public class ExtBridge implements Runnable {
             } else {
                 return false;
             }
-            String out = runCmdOut(cmd.toArray(new String[0]));
-            return out == null || !out.contains("Error:");
+            String out = runCmdOut(true, cmd.toArray(new String[0]));
+            return out != null && !out.contains("Error:") && !out.contains("Exception");
         } catch (Throwable ignored) {
             return false;
         }
@@ -2789,7 +2798,7 @@ public class ExtBridge implements Runnable {
                         saveAppModesLocked();
                     }
                     if (restart == 1) {
-                        runCmdOut("am", "force-stop", pkg);
+                        runCmdOut("am", "force-stop", "--user", String.valueOf(sHelperUser), pkg);
                     }
                     applyAppModeCompat(pkg, mode, true);
                     if (restart == 1 && sVdId > 0 && sMirrorMode != 1 && sCtx != null) {
@@ -3046,18 +3055,26 @@ public class ExtBridge implements Runnable {
                     else if (pt.length == 3) res = m.invoke(sAtm, 25, false, true);
                     else if (pt.length == 4) res = m.invoke(sAtm, 25, false, true, -1);
                 } else if ("getRecentTasks".equals(name) && pt.length == 3) {
-                    res = m.invoke(sAtm, 25, 0, 0);
+                    res = m.invoke(sAtm, 25, 0, sHelperUser);
                 }
-                if (res instanceof List<?>) return (List<?>) res;
+                if (res instanceof List<?>) return tasksForHelperUser((List<?>) res);
                 if (res != null) {
                     try {
                         Object list = res.getClass().getMethod("getList").invoke(res);
-                        if (list instanceof List<?>) return (List<?>) list;
+                        if (list instanceof List<?>) return tasksForHelperUser((List<?>) list);
                     } catch (Throwable ignored) {}
                 }
             }
         } catch (Throwable ignored) {}
         return null;
+    }
+
+    private static List<?> tasksForHelperUser(List<?> tasks) {
+        ArrayList<Object> owned = new ArrayList<>();
+        for (Object t : tasks) {
+            if (t != null && readIntField(t, "userId", -1) == sHelperUser) owned.add(t);
+        }
+        return owned;
     }
 
     private static void writeTasksToParcel(Parcel reply) {
@@ -3232,8 +3249,7 @@ public class ExtBridge implements Runnable {
                 if (li != null) {
                     li.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                     ActivityOptions opts = makeExtLaunchOptionsForMode(sVdId, mode);
-                    invokeAtmStartActivity(li, opts.toBundle(), sVdId, 1);
-                    return true;
+                    return invokeAtmStartActivity(li, opts.toBundle(), sVdId, 1);
                 }
             }
         } catch (Throwable ignored) {}
@@ -3641,7 +3657,7 @@ public class ExtBridge implements Runnable {
                     .invoke(sAtm, sVdId);
             if (infos != null) {
                 for (Object info : infos) {
-                    if (info == null) continue;
+                    if (info == null || readIntField(info, "userId", -1) != sHelperUser) continue;
                     Object top = null;
                     try { top = info.getClass().getField("topActivity").get(info); } catch (Throwable ignored) {}
                     if (top instanceof ComponentName) {
@@ -3963,7 +3979,7 @@ public class ExtBridge implements Runnable {
                 if (li != null) {
                     li.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                     ActivityOptions opts = makeExtLaunchOptionsForMode(sVdId, 1);
-                    invokeAtmStartActivity(li, opts.toBundle(), sVdId, 1);
+                    if (!invokeAtmStartActivity(li, opts.toBundle(), sVdId, 1)) return -1;
                     notifyHelperSync();
                     return 0;
                 }
@@ -3996,6 +4012,10 @@ public class ExtBridge implements Runnable {
     }
 
     private static String runCmdOut(String... cmd) {
+        return runCmdOut(false, cmd);
+    }
+
+    private static String runCmdOut(boolean requireSuccess, String... cmd) {
         StringBuilder sb = new StringBuilder();
         Process p = null;
         try {
@@ -4019,8 +4039,10 @@ public class ExtBridge implements Runnable {
                     }
                 }
             }
-            p.waitFor(3000L, java.util.concurrent.TimeUnit.MILLISECONDS);
+            boolean exited = p.waitFor(3000L, java.util.concurrent.TimeUnit.MILLISECONDS);
+            if (requireSuccess && (!exited || p.exitValue() != 0)) return null;
         } catch (Throwable ignored) {
+            if (requireSuccess) return null;
         } finally {
             if (p != null) {
                 try { p.destroyForcibly(); } catch (Throwable ignored) {}
@@ -4222,8 +4244,7 @@ public class ExtBridge implements Runnable {
                 int targetDid = (arg >= 0) ? arg : (sVdId > 0 ? sVdId : 0);
                 ActivityOptions opts = ActivityOptions.makeBasic();
                 opts.setLaunchDisplayId(targetDid);
-                invokeAtmStartActivity(i, opts.toBundle(), targetDid, targetDid > 0 ? 1 : 0);
-                return true;
+                return invokeAtmStartActivity(i, opts.toBundle(), targetDid, targetDid > 0 ? 1 : 0);
             }
         } catch (Throwable ignored) {}
         return false;
