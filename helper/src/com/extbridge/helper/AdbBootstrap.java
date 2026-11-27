@@ -97,12 +97,11 @@ public final class AdbBootstrap {
     public static void cancelActivation(ActivationSession.Ticket ticket) { if (ticket != null) ticket.cancel(); }
     public static void cancelAllActivations() { SESSION.cancelAll(); }
     public static void cancelNotificationActivation() { SESSION.cancelNotification(); }
-    private static void invalidateLaunch(Context app, ActivationSession.Ticket ticket, File cancelFile) {
+    private static void invalidateLaunch(Context app, ActivationSession.Ticket ticket) {
         synchronized (AdbBootstrap.class) {
             Set<String> cancelled = new HashSet<>(prefs(app).getStringSet("cancelled_activations", Collections.emptySet()));
             cancelled.add(ticket.token); prefs(app).edit().putStringSet("cancelled_activations", cancelled).commit();
         }
-        try { new FileOutputStream(cancelFile).close(); } catch (Throwable error) { Log.w(TAG, "Unable to write cancellation marker", error); }
     }
 
     public static synchronized DiscoveryState getDiscoveryState() {
@@ -286,11 +285,23 @@ public final class AdbBootstrap {
 
     private static File getAdbFile(Context context) { return new File(context.getApplicationInfo().nativeLibraryDir, "libadb.so"); }
     public static boolean isNativeAdbAvailable(Context context) { File file = getAdbFile(context); return file.isFile() && file.canExecute(); }
-    public static boolean hasSuBinaryHint() {
-        for (String path : new String[]{"/system/bin/su", "/system/xbin/su", "/sbin/su", "/vendor/bin/su", "/debug_ramdisk/su",
-                "/data/adb/ksu/bin/su", "/data/adb/ap/bin/su", "/data/adb/modules/apatch/bin/su"}) if (new File(path).exists()) return true;
-        return false;
+    private static final String[] SU_PATHS = {"/system/bin/su", "/system/xbin/su", "/sbin/su", "/vendor/bin/su", "/debug_ramdisk/su",
+            "/data/adb/ksu/bin/su", "/data/adb/ap/bin/su", "/data/adb/modules/apatch/bin/su"};
+
+    private static String findSuBinary(boolean executable) {
+        String path = System.getenv("PATH");
+        if (path != null) for (String dir : path.split(":")) {
+            if (!dir.startsWith("/")) continue;
+            File su = new File(dir, "su");
+            if (executable ? su.isFile() && su.canExecute() : su.exists()) return su.getAbsolutePath();
+        }
+        for (String candidate : SU_PATHS) {
+            File su = new File(candidate);
+            if (executable ? su.isFile() && su.canExecute() : su.exists()) return candidate;
+        }
+        return null;
     }
+    public static boolean hasSuBinaryHint() { return findSuBinary(false) != null; }
     public static ActivationSession.Ticket rootBootstrapAsync(Context context, boolean ignoredMarkAutoRoot, ProgressListener listener) {
         return submit(context, new ActivationFlow.Request(ActivationSession.Mode.ROOT, "", 0, "", 0), listener);
     }
@@ -314,22 +325,28 @@ public final class AdbBootstrap {
         ActivationSession.Ticket ticket = SESSION.begin(request.mode);
         if (ticket == null) { if (listener != null) sMain.post(() -> listener.onActivationResult(ActivationFlow.busy())); return null; }
         Context app = context.getApplicationContext();
-        File cancelFile = new File(app.getFilesDir(), "activation-cancel-" + ticket.token);
-        ticket.onCancel(() -> invalidateLaunch(app, ticket, cancelFile));
+        ticket.onCancel(() -> invalidateLaunch(app, ticket));
         sExec.execute(() -> {
             PrivateAdbServer server = new PrivateAdbServer(app);
+            boolean rootMode = request.mode == ActivationSession.Mode.ROOT || request.mode == ActivationSession.Mode.AUTO_ROOT;
+            String resolvedSu = rootMode ? findSuBinary(true) : null;
+            String su = resolvedSu == null ? "su" : resolvedSu;
+            int user = helperUser();
+            RootLaunchGate rootGate = rootMode ? new RootLaunchGate(ticket) : null;
             ActivationFlow.Result result;
             try {
                 WORKER.set(ticket);
                 lastOutcome = "RUNNING"; lastStage = "VALIDATE"; lastMode = request.mode.name(); lastToken = ticket.token;
                 result = ActivationFlow.run(request, ticket.token, new ActivationFlow.Environment() {
-                    public boolean cancelled() { return ticket.isCancelled() || BridgeService.sUserStopping || request.mode == ActivationSession.Mode.AUTO_ROOT && !isAutoRootEnabled(app); }
+                    public boolean cancelled() { return activationCancelled(ticket); }
                     public boolean adbAvailable() { return isNativeAdbAvailable(app); }
                     public ActivationFlow.Command startAdbServer() { return server.start(ticket); }
                     public boolean hostAllowed(String host) { return localHost(host); }
                     public ActivationFlow.Command adb(String... args) { return runAdb(app, 18000, args); }
-                    public ActivationFlow.Command root(String script) { return runSu(18000, script); }
-                    public String script(String token, String stagedJar, String sha256, boolean root) { return DaemonLaunchScript.build(token, stagedJar, sha256, helperUser(), root ? cancelFile.getAbsolutePath() : null, root); }
+                    public ActivationFlow.Command root(String script) { return runSu(su, 28000, script, rootGate); }
+                    public String script(String token, String stagedJar, String sha256, boolean root) {
+                        return DaemonLaunchScript.build(token, stagedJar, sha256, user, root ? new File(stagedJar).length() : 0, root ? su : null);
+                    }
                     public ActivationFlow.StagedJar stagedJar() { return stageBridgeJar(app, ticket.token); }
                     public int discoverConnectPort() { return getDiscoveryState().connectPort; }
                     public ActivationFlow.Probe probe() {
@@ -344,12 +361,17 @@ public final class AdbBootstrap {
                 if (result.outcome == ActivationFlow.Outcome.CANCELLED) ticket.cancel();
                 boolean rejectedLaunch = result.outcome == ActivationFlow.Outcome.FAILED
                         && (result.stage == ActivationFlow.Stage.DEPLOY || result.stage == ActivationFlow.Stage.VERIFY);
-                if (rejectedLaunch) invalidateLaunch(app, ticket, cancelFile);
+                if (rejectedLaunch) invalidateLaunch(app, ticket);
                 // A failed/abandoned launch may arrive after the local adb/su process
                 // returned. Revoke only this token, never an unrelated existing daemon.
-                if (ticket.isCancelled() || rejectedLaunch) BridgeClient.shutdownOwned(ticket.token);
+                if ((ticket.isCancelled() || rejectedLaunch) && !BridgeClient.shutdownOwned(ticket.token)
+                        && rootGate != null && rootGate.keepGranted) {
+                    // Once the shell has granted detach, Binder may still be unavailable.
+                    // Match only this ticket's daemon; never stop the previous instance here.
+                    WORKER.remove();
+                    runSu(su, 4500, DaemonLaunchScript.stopOwnedRoot(ticket.token, user, su), null);
+                }
                 if (ticket.sameGeneration()) { lastOutcome = result.outcome.name(); lastStage = result.stage.name(); }
-                if (!ticket.isCancelled() && !rejectedLaunch) cancelFile.delete();
             } finally {
                 // Always tear down the local adb server once activation ends so no
                 // lingering server (and its private socket) survives the flow.
@@ -376,8 +398,38 @@ public final class AdbBootstrap {
             return new ActivationFlow.StagedJar(file.getAbsolutePath(), hex.toString());
         } catch (IOException | java.security.NoSuchAlgorithmException error) { throw new IllegalStateException("Unable to stage daemon", error); }
     }
-    private static ActivationFlow.Command runSu(long timeout, String script) {
-        return command(new ProcessBuilder("su", "-c", script), timeout);
+    private static boolean activationCancelled(ActivationSession.Ticket ticket) {
+        return ticket != null && (ticket.isCancelled() || BridgeService.sUserStopping
+                || ticket.mode == ActivationSession.Mode.AUTO_ROOT && !isAutoRootEnabled(sApp));
+    }
+
+    private static final class RootLaunchGate {
+        final ActivationSession.Ticket ticket;
+        volatile boolean keepGranted;
+        private boolean replaceGranted;
+
+        RootLaunchGate(ActivationSession.Ticket ticket) { this.ticket = ticket; }
+
+        boolean handle(String line, OutputStream input) throws IOException {
+            boolean replace = line.equals(DaemonLaunchScript.rootReady(ticket.token));
+            boolean keep = line.equals(DaemonLaunchScript.rootStarted(ticket.token));
+            if (!replace && !keep) return false;
+            synchronized (ticket) {
+                if (activationCancelled(ticket) || (replace && replaceGranted) || (keep && (!replaceGranted || keepGranted))) {
+                    input.close();
+                    return true;
+                }
+                if (replace) replaceGranted = true;
+                if (keep) keepGranted = true;
+                input.write(DaemonLaunchScript.rootApproval().getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+                input.flush();
+            }
+            return true;
+        }
+    }
+
+    private static ActivationFlow.Command runSu(String su, long timeout, String script, RootLaunchGate gate) {
+        return command(new ProcessBuilder(su, "-c", script), timeout, true, gate);
     }
     private static ActivationFlow.Command runAdb(Context context, long timeout, String... args) {
         try { return command(adbBuilder(context, args), timeout); }
@@ -398,31 +450,47 @@ public final class AdbBootstrap {
         return builder;
     }
     private static ActivationFlow.Command command(ProcessBuilder builder, long timeout) {
+        return command(builder, timeout, false, null);
+    }
+
+    private static void closeQuietly(OutputStream output) {
+        try { output.close(); } catch (IOException ignored) {}
+    }
+
+    private static ActivationFlow.Command command(ProcessBuilder builder, long timeout, boolean root, RootLaunchGate gate) {
         ActivationSession.Ticket ticket = WORKER.get();
-        if (ticket != null && (ticket.isCancelled() || ticket.mode == ActivationSession.Mode.AUTO_ROOT && !isAutoRootEnabled(sApp))) return new ActivationFlow.Command(125, "CANCELLED");
+        if (activationCancelled(ticket)) return new ActivationFlow.Command(125, "CANCELLED");
         Process process = null;
         try {
-            if (builder.command().get(0).equals("su")) ++rootExecutions; else ++adbExecutions;
+            if (root) ++rootExecutions; else ++adbExecutions;
             process = builder.redirectErrorStream(true).start();
             final Process running = process;
-            if (ticket != null) ticket.attachProcess(() -> running.destroy());
-            process.getOutputStream().close();
+            final OutputStream commandInput = running.getOutputStream();
+            if (ticket != null) ticket.attachProcess(gate == null ? running::destroy : () -> closeQuietly(commandInput));
+            if (gate == null) commandInput.close();
             StringBuilder output = new StringBuilder();
             Thread reader = new Thread(() -> { try (BufferedReader input = new BufferedReader(new InputStreamReader(running.getInputStream()))) {
-                String line; while ((line = input.readLine()) != null) synchronized (output) { if (output.length() < 8192) output.append(line).append('\n'); }
-            } catch (IOException ignored) {} });
+                String line;
+                while ((line = input.readLine()) != null) {
+                    if (gate != null && gate.handle(line, commandInput)) continue;
+                    if (gate != null && (line.startsWith("ERR_") || line.equals("NO_ROOT") || line.equals("EXTBRIDGE_LAUNCH_FAILED"))) closeQuietly(commandInput);
+                    synchronized (output) { if (output.length() < 8192) output.append(line).append('\n'); }
+                }
+            } catch (IOException ignored) { closeQuietly(commandInput); } });
             reader.setDaemon(true); reader.start();
             long deadline = SystemClock.elapsedRealtime() + timeout;
             boolean exited = false;
             while (!exited && SystemClock.elapsedRealtime() < deadline) {
-                if (ticket != null && (ticket.isCancelled() || ticket.mode == ActivationSession.Mode.AUTO_ROOT && !isAutoRootEnabled(sApp))) {
-                    ticket.cancel(); try { process.destroy(); } catch (Throwable ignored) {}
+                if (activationCancelled(ticket)) {
+                    ticket.cancel();
+                    stopCommand(process, commandInput, gate != null);
                     reader.join(200); return new ActivationFlow.Command(125, "CANCELLED");
                 }
                 exited = process.waitFor(100, TimeUnit.MILLISECONDS);
             }
-            if (!exited) process.destroyForcibly();
+            if (!exited) stopCommand(process, commandInput, gate != null);
             reader.join(1000);
+            closeQuietly(commandInput);
             synchronized (output) {
                 int code = exited ? process.exitValue() : -3;
                 if (code != 0) Log.w(TAG, "Activation command failed: " + builder.command().get(0) + " code=" + code
@@ -430,11 +498,19 @@ public final class AdbBootstrap {
                 return new ActivationFlow.Command(code, output.toString());
             }
         } catch (Throwable error) {
-            if (process != null) try { process.destroy(); } catch (Throwable ignored) {}
+            if (process != null) try { closeQuietly(process.getOutputStream()); process.destroy(); } catch (Throwable ignored) {}
             Log.w(TAG, "Activation executable failed", error);
             return new ActivationFlow.Command(-2, error.getClass().getSimpleName());
         }
         finally { if (ticket != null) ticket.detachProcess(); }
+    }
+
+    private static void stopCommand(Process process, OutputStream input, boolean gated) throws InterruptedException {
+        if (gated) {
+            // Give the shell a chance to consume EOF and clean up its own staging/PID.
+            closeQuietly(input);
+            if (!process.waitFor(1200, TimeUnit.MILLISECONDS)) process.destroyForcibly();
+        } else process.destroyForcibly();
     }
     public static void showPairingNotification(Context context, String text) {
         initialize(context);

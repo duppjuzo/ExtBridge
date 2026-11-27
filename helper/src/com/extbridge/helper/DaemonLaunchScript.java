@@ -6,20 +6,25 @@ public final class DaemonLaunchScript {
 
     private static final String TMP = "/data/local/tmp/";
     private static final String LIVE = TMP + "extbridge.jar";
-    private static final String MAIN = "app_process /data/local/tmp com.extbridge.daemon.ExtBridge";
+    private static final String LOG = TMP + "extbridge.log";
+    private static final String APP_PROCESS = "/system/bin/app_process";
+    private static final String RUNCON = "runcon u:r:shell:s0 " + APP_PROCESS;
+    private static final String MAIN_ARGS = " /data/local/tmp com.extbridge.daemon.ExtBridge";
     private static final String PROCESS = "^(/system/bin/)?app_process /data/local/tmp com[.]extbridge[.]daemon[.]ExtBridge";
+    private static final String SHELL_ID = "[ \"$(id -u):$(id -g)\" = 2000:2000 ]";
     private static final String HELPER = "com.extbridge.helper";
+    private static final String ROOT_APPROVAL = "GO";
     private static final String PC_TOKEN = java.util.UUID.randomUUID().toString().replace("-", "");
 
     public static String quote(String value) { return "'" + value.replace("'", "'\\''") + "'"; }
 
-    private static String verify(String jar, int user) {
-        return "timeout 8 env CLASSPATH=" + jar + " " + MAIN + " --verify-helper --helper-user " + user;
+    private static String verify(String jar, int user, String launcher) {
+        return "timeout 8 env CLASSPATH=" + jar + " " + launcher + MAIN_ARGS + " --verify-helper --helper-user " + user + " </dev/null";
     }
 
     // Only called after the staged archive and the installed helper have passed preflight.
     private static String replaceAndGrant(String jar, int user, String token) {
-        return "(content call --user " + user + " --uri content://com.extbridge.helper.provider --method stopForActivation --arg " + token + " >/dev/null 2>&1 || true) && "
+        return "(timeout 4 content call --user " + user + " --uri content://com.extbridge.helper.provider --method stopForActivation --arg " + token + " >/dev/null 2>&1 || true) && "
                 + "(pkill -f '" + PROCESS + "' 2>/dev/null || true) && sleep 0.4 && "
                 + "{ ! pgrep -f '" + PROCESS + "' >/dev/null || { echo OLD_DAEMON_NOT_STOPPED; exit 23; }; } && "
                 + "mv -f " + jar + " " + LIVE + " && "
@@ -31,45 +36,89 @@ public final class DaemonLaunchScript {
                 + "(dumpsys deviceidle whitelist +" + HELPER + " >/dev/null 2>&1 || true)";
     }
 
-    private static String start(String token, int user) {
-        return "env CLASSPATH=" + LIVE + " nohup " + MAIN + " --activation-token " + token + " --helper-user " + user
-                + " </dev/null >" + TMP + "extbridge.log 2>&1";
+    private static String daemonOptions(String token, int user) {
+        return " --activation-token " + token + " --helper-user " + user;
     }
 
-    public static String build(String token, String stagedJar, String sha256, int user, String cancelFile, boolean root) {
-        if (!token.matches("[a-zA-Z0-9_-]{16,80}") || !sha256.matches("[a-f0-9]{64}") || user < 0) {
-            throw new IllegalArgumentException("Invalid activation identity");
-        }
+    private static String start(String token, int user, String launcher) {
+        String exec = "exec env CLASSPATH=" + LIVE + " nohup " + launcher + MAIN_ARGS + daemonOptions(token, user) + " </dev/null";
+        // Older Root installs may have left a root-owned log. Never truncate it in place
+        // or let an unusable log prevent app_process from starting.
+        return "(rm -f " + LOG + " 2>/dev/null; if (set -C; : > " + LOG + ") 2>/dev/null && test -f " + LOG
+                + " && test ! -L " + LOG + "; then " + exec + " >>" + LOG + " 2>&1; else " + exec + " >/dev/null 2>&1; fi)";
+    }
+
+    private static void checkIdentity(String token, int user) {
+        if (token == null || !token.matches("[a-zA-Z0-9_-]{16,80}") || user < 0) throw new IllegalArgumentException("Invalid activation identity");
+    }
+
+    public static String rootReady(String token) { return "EXTBRIDGE_ROOT_READY:" + token; }
+    public static String rootStarted(String token) { return "EXTBRIDGE_ROOT_STARTED:" + token; }
+    public static String rootApproval() { return ROOT_APPROVAL + "\n"; }
+
+    private static String awaitApproval(String marker) {
+        return "echo " + marker + "; IFS= read -r approval && [ \"$approval\" = " + ROOT_APPROVAL + " ] || exit 125; ";
+    }
+
+    public static String build(String token, String stagedJar, String sha256, int user, long rootJarBytes, String su) {
+        checkIdentity(token, user);
+        boolean root = su != null;
+        if (!sha256.matches("[a-f0-9]{64}") || (root && rootJarBytes <= 0)) throw new IllegalArgumentException("Invalid staged JAR");
         String dir = TMP + "extbridge." + token;
         String jar = dir + "/daemon.jar";
         String staged = quote(stagedJar);
-        String cancel = cancelFile == null ? "" : "if [ -e " + quote(cancelFile) + " ]; then exit 125; fi; ";
-        String deploy = "[ \"$(id -u):$(id -g)\" = 2000:2000 ] || { echo ERR_SHELL_ID; exit 12; }; "
+        String checkedLauncher = root
+                ? "set -- " + APP_PROCESS + "; case \"$(id -Z 2>/dev/null)\" in *:shell:*) ;; *) if " + verify(jar, user, RUNCON)
+                    + " >/dev/null 2>&1; then set -- " + RUNCON + "; fi;; esac; "
+                : "";
+        String verify = root ? "{ [ \"$#\" -gt 1 ] || " + verify(jar, user, APP_PROCESS) + "; }" : verify(jar, user, APP_PROCESS);
+        String cleanup = (root ? "if [ -n \"$PID\" ]; then kill \"$PID\" 2>/dev/null; fi; " : "")
+                + "rm -f " + jar + (root ? "" : " " + staged) + "; rmdir " + dir;
+        String deploy = SHELL_ID + " || { echo ERR_SHELL_ID; exit 12; }; "
                 + "umask 077; mkdir -m 700 " + dir + " || exit 21; "
-                + "trap " + quote("rm -f " + jar + (root ? "" : " " + staged) + "; rmdir " + dir) + " EXIT; "
-                + "cat " + (root ? "" : staged) + " > " + jar + " && chmod 444 " + jar + " || exit 21; "
+                + (root ? "PID=; " : "") + "trap " + quote(cleanup) + " EXIT; "
+                + (root ? "head -c " + rootJarBytes : "cat " + staged) + " > " + jar + " && chmod 444 " + jar + " || exit 21; "
                 + "[ \"$(sha256sum " + jar + " | cut -d' ' -f1)\" = " + sha256 + " ] || { echo ERR_STAGE_HASH; exit 21; }; "
-                + verify(jar, user) + " || { echo ERR_VERIFY_HELPER; exit 21; }; " + cancel
-                + replaceAndGrant(jar, user, token) + " || exit 22; " + cancel
-                + start(token, user) + " & PID=$!; sleep 0.6; "
+                + checkedLauncher + verify + " || { echo ERR_VERIFY_HELPER; exit 21; }; "
+                + (root ? awaitApproval(rootReady(token)) : "")
+                + "{ " + replaceAndGrant(jar, user, token) + "; } </dev/null || exit 22; "
+                + start(token, user, root ? "\"$@\"" : APP_PROCESS) + " & PID=$!; sleep 0.6; "
                 + "kill -0 \"$PID\" 2>/dev/null || { echo EXTBRIDGE_LAUNCH_FAILED; exit 24; }; "
-                + "echo EXTBRIDGE_LAUNCH:" + token + ":$PID";
+                + (root ? awaitApproval(rootStarted(token)) : "")
+                + "echo EXTBRIDGE_LAUNCH:" + token + ":$PID; PID=";
         if (!root) return deploy;
 
         // A mount-isolated su may not see the app's private file. Only read as root;
         // even the preflight app_process is run as shell, after checking the received digest.
         String supply = "supply_jar() { if [ -f " + staged + " ] && [ ! -L " + staged + " ] && "
                 + "[ \"$(sha256sum " + staged + " 2>/dev/null | cut -d' ' -f1)\" = " + sha256 + " ]; then cat " + staged + "; return; fi; "
-                + "for p in $(pm path --user " + user + " " + HELPER + " | sed -n 's/^package://p' | tr -d '\\r'); do "
+                + "for p in $(pm path --user " + user + " " + HELPER + " 2>/dev/null | sed -n 's/^package://p' | tr -d '\\r') "
+                + "$(pm path " + HELPER + " 2>/dev/null | sed -n 's/^package://p' | tr -d '\\r'); do "
                 + "[ -f \"$p\" ] && [ ! -L \"$p\" ] || continue; "
                 + "[ \"$(unzip -p \"$p\" assets/extbridge.jar 2>/dev/null | sha256sum | cut -d' ' -f1)\" = " + sha256 + " ] || continue; "
                 + "unzip -p \"$p\" assets/extbridge.jar; return; done; return 21; }; ";
-        // Select an available su syntax *before* starting the transaction. Never retry a
-        // partially completed deployment or fall back to executing in the root shell.
-        return "[ \"$(id -u)\" = 0 ] || { echo NO_ROOT; exit 12; }; " + cancel + supply
-                + "for form in uid name sh; do case $form in uid) set -- su 2000 -c;; name) set -- su shell -c;; sh) set -- su 2000 /system/bin/sh -c;; esac; "
-                + "[ \"$(\"$@\" 'id -u' 2>/dev/null)\" = 2000 ] || continue; "
-                + "supply_jar | \"$@\" " + quote(deploy) + "; exit $?; done; echo ERR_SHELL_ID; exit 12";
+        // The shell reads exactly the JAR length, then waits for app approvals. No app-private
+        // path needs to be readable as UID 2000. EOF denies both gates, even without Binder.
+        String relay = "{ supply_jar || exit 21; for gate in replace keep; do "
+                + "IFS= read -r -t 22 approval || break; printf '%s\\n' \"$approval\" || break; done; }";
+        return supply + asShell(su, relay + " | \"$@\" " + quote(deploy));
+    }
+
+    private static String asShell(String su, String command) {
+        String binary = quote(su);
+        // Select a working su form before any mutation. Never retry a partially completed
+        // transaction or let the root shell load the daemon.
+        return "[ \"$(id -u)\" = 0 ] || { echo NO_ROOT; exit 12; }; "
+                + "for form in uid name sh; do case $form in uid) set -- " + binary + " 2000 -c;; name) set -- " + binary
+                + " shell -c;; sh) set -- " + binary + " 2000 /system/bin/sh -c;; esac; "
+                + "\"$@\" " + quote(SHELL_ID) + " </dev/null 2>/dev/null || continue; "
+                + command + "; exit $?; done; echo ERR_SHELL_ID; exit 12";
+    }
+
+    public static String stopOwnedRoot(String token, int user, String su) {
+        checkIdentity(token, user);
+        String stop = SHELL_ID + " && pkill -f " + quote(PROCESS + daemonOptions(token, user) + "$");
+        return asShell(su, "\"$@\" " + quote(stop));
     }
 
     /** No host-shell interpolation: can be pasted into PowerShell, cmd.exe or a POSIX shell. */
@@ -81,8 +130,8 @@ public final class DaemonLaunchScript {
                 + "trap 'rm -f " + apk + " " + jar + "; rmdir " + dir + "' EXIT; "
                 + "pm path --user " + user + " " + HELPER + " | grep '^package:' | cut -d: -f2 | head -n1 | xargs cat > " + apk + " && "
                 + "test -s " + apk + " && unzip -p " + apk + " assets/extbridge.jar > " + jar + " && chmod 444 " + jar + " && "
-                + verify(jar, user) + " && " + replaceAndGrant(jar, user, PC_TOKEN) + " && "
-                + "(" + start(PC_TOKEN, user) + " &) && sleep 0.6 && "
+                + verify(jar, user, APP_PROCESS) + " && " + replaceAndGrant(jar, user, PC_TOKEN) + " && "
+                + "(" + start(PC_TOKEN, user, APP_PROCESS) + " &) && sleep 0.6 && "
                 + "if pgrep -f '" + PROCESS + " --activation-token " + PC_TOKEN + "' >/dev/null; then echo EXTBRIDGE_PC_READY; else echo EXTBRIDGE_PC_FAILED; exit 24; fi\"";
     }
 }

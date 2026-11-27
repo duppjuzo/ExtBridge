@@ -15,6 +15,12 @@ appops set com.extbridge.helper ACCESS_RESTRICTED_SETTINGS allow 2>/dev/null
 pm grant com.extbridge.helper android.permission.POST_NOTIFICATIONS 2>/dev/null
 dumpsys deviceidle whitelist +com.extbridge.helper >/dev/null 2>&1
 
-nohup app_process /data/local/tmp com.extbridge.daemon.ExtBridge >/data/local/tmp/extbridge.log 2>&1 </dev/null &
+log_file=/data/local/tmp/extbridge.log
+log_dst=/dev/null
+rm -f "$log_file" 2>/dev/null
+if (umask 077; set -C; : > "$log_file") 2>/dev/null && [ -f "$log_file" ] && [ ! -L "$log_file" ]; then
+    log_dst=$log_file
+fi
+nohup app_process /data/local/tmp com.extbridge.daemon.ExtBridge >>"$log_dst" 2>&1 </dev/null &
 sleep 2
-cat /data/local/tmp/extbridge.log
+[ "$log_dst" = /dev/null ] || cat "$log_dst"

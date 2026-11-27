@@ -40,7 +40,11 @@ public class BridgeProvider extends ContentProvider {
         if ("getNativeAdbInfo".equals(method)) return AdbBootstrap.nativeAdbDiagnostics(getContext());
         if ("getDaemonStatus".equals(method)) {
             BridgeClient.Status status = BridgeClient.getStatus();
+            if (!status.connected) BridgeClient.requestBinder(getContext());
             Bundle result = new Bundle();
+            // A cold app process has no cached Binder, even when the daemon is alive.
+            // Keep the legacy boolean, but expose whether its state is actually known.
+            result.putString("connection_state", status.connected ? "CONNECTED" : "UNKNOWN");
             result.putBoolean("connected", status.connected);
             result.putInt("daemon_pid", status.daemonPid);
             result.putInt("daemon_uid", status.daemonUid);
@@ -53,7 +57,8 @@ public class BridgeProvider extends ContentProvider {
             result.putBoolean("auto_root_enabled", AdbBootstrap.isAutoRootEnabled(getContext()));
             result.putInt("app_pid", android.os.Process.myPid());
             result.putInt("app_uid", android.os.Process.myUid());
-            result.putString("issue", status.connectionIssue);
+            result.putString("issue", status.connected || !status.connectionIssue.isEmpty()
+                    ? status.connectionIssue : "尚未确认后台服务状态，已请求重新连接，请稍后重试");
             AdbBootstrap.diagnostics(result);
             return result;
         }
