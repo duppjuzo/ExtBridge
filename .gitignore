@@ -4,6 +4,7 @@ out/
 *.apk
 *.idsig
 *.jar
+!gradle/wrapper/gradle-wrapper.jar
 *.dex
 *.class
 *.ap_
@@ -20,6 +21,8 @@ out/
 *.log
 *.tmp
 *.xml.dump
+__pycache__/
+*.pyc
 .DS_Store
 Thumbs.db
 
@@ -29,3 +32,6 @@ Thumbs.db
 *.iml
 .gradle/
 local.properties
+/.kotlin/
+/helper/build/
+/helper/assets/extbridge.jar

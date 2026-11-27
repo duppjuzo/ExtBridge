@@ -1,14 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.extbridge.helper"
-    android:versionCode="21"
-    android:versionName="3.4.2-lite">
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+      miuix-blur declares Android minSdk 33 (its shader path needs API 33).
+      The app keeps minSdk 30 on purpose: the blur artifacts are only ever
+      *initialized* behind isRuntimeShaderSupported(), so on API 30-32 they are
+      never loaded. tools:overrideLibrary records that deliberate choice; the
+      runtime capability branch in AboutPage is what keeps this safe.
+    -->
+    <uses-sdk tools:overrideLibrary="top.yukonga.miuix.kmp.blur" />
 
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <!-- Retain Lite's launcher/task-metadata visibility contract; this is not a Play Store release. -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
@@ -17,19 +26,17 @@
 
     <application
         android:allowBackup="false"
-        android:extractNativeLibs="true"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
-        android:label="ExtBridge"
+        android:label="ExtBridge Lite"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
 
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:label="ExtBridge"
             android:launchMode="singleTask"
             android:taskAffinity="com.extbridge.helper.tablet"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize">
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|uiMode">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -39,16 +46,16 @@
         <activity
             android:name=".TouchpadActivity"
             android:exported="true"
-            android:label="ExtBridge 触摸板"
+            android:label="大触摸板"
             android:launchMode="singleTask"
             android:taskAffinity="com.extbridge.helper.tablet"
             android:windowSoftInputMode="adjustResize|stateHidden"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden" />
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|uiMode" />
 
         <activity
             android:name=".LauncherActivity"
             android:exported="true"
-            android:label="ExtBridge 桌面"
+            android:label="扩展桌面"
             android:launchMode="singleTask"
             android:taskAffinity="com.extbridge.helper.extdesktop"
             android:resizeableActivity="true"
@@ -59,6 +66,7 @@
         <service
             android:name=".BridgeService"
             android:exported="true"
+            android:permission="android.permission.INJECT_EVENTS"
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
@@ -80,8 +88,10 @@
 
         <receiver
             android:name=".ControlReceiver"
-            android:exported="true">
+            android:exported="true"
+            android:permission="android.permission.INJECT_EVENTS">
             <intent-filter>
+                <action android:name="com.extbridge.helper.BINDER_PUSH" />
                 <action android:name="com.extbridge.helper.TOGGLE_INPUT" />
                 <action android:name="com.extbridge.helper.STATE_SYNC" />
                 <action android:name="com.extbridge.helper.REBUILD" />
@@ -93,6 +103,10 @@
                 <action android:name="com.extbridge.helper.EXIT_ALL" />
             </intent-filter>
         </receiver>
+
+        <receiver
+            android:name=".ControlReceiver$Internal"
+            android:exported="false" />
 
         <receiver
             android:name=".AdbPairingReceiver"

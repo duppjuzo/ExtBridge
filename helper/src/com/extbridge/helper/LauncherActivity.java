@@ -104,7 +104,7 @@ public class LauncherActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         mAppliedDensityDpi = getResources().getConfiguration().densityDpi;
-        extractBinder(getIntent());
+        if (BridgeClient.getService() == null) BridgeClient.requestBinder(this);
         BridgeService.ensureStarted(this);
         buildUi();
         if (!sPendingQuery.isEmpty() && mSearchInput != null) {
@@ -113,7 +113,8 @@ public class LauncherActivity extends Activity {
             mSearchInput.setText(mQuery);
         }
         try {
-            registerReceiver(mSyncRx, new IntentFilter("com.extbridge.helper.STATE_SYNC"), RECEIVER_EXPORTED);
+            registerReceiver(mSyncRx, new IntentFilter("com.extbridge.helper.STATE_SYNC"),
+                    "android.permission.INJECT_EVENTS", null, RECEIVER_EXPORTED);
         } catch (Throwable ignored) {}
         loadAppsAsync();
         loadWallpaperAsync(false);
@@ -160,14 +161,6 @@ public class LauncherActivity extends Activity {
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        extractBinder(intent);
-    }
-
-    private void extractBinder(Intent i) {
-        if (i != null && i.getExtras() != null) {
-            android.os.IBinder cb = i.getExtras().getBinder("cb");
-            if (cb != null) BridgeClient.setBinder(cb);
-        }
         if (BridgeClient.getService() == null) BridgeClient.requestBinder(this);
     }
 
@@ -256,7 +249,7 @@ public class LauncherActivity extends Activity {
         top.setPadding(dp(4), 0, dp(4), dp(12));
 
         mTitleView = new TextView(this);
-        mTitleView.setText("ExtBridge 扩展桌面");
+        mTitleView.setText("扩展桌面");
         mTitleView.setTextColor(Color.WHITE);
         mTitleView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 15f);
         mTitleView.getPaint().setFakeBoldText(true);
@@ -534,7 +527,7 @@ public class LauncherActivity extends Activity {
                 || (st.connected && (winW < st.virtW * 0.88f || winH < st.virtH * 0.88f));
 
         if (mTitleView != null) {
-            mTitleView.setText(compact ? "DeX 桌面" : "ExtBridge 扩展桌面");
+            mTitleView.setText(compact ? "DeX 桌面" : "扩展桌面");
             mTitleView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, compact ? 13f : 15f);
         }
         if (mBtnModeTip != null) mBtnModeTip.setVisibility(compact ? View.GONE : View.VISIBLE);

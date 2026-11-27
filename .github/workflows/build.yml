@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       create_release:
-        description: 'Publish GitHub Release (public download without login)'
+        description: 'Publish GitHub Release from main branch (public download without login)'
         required: false
         default: 'false'
         type: choice
@@ -24,65 +24,178 @@ on:
           - 'false'
           - 'true'
 
+# Least-privilege default across all jobs (including pull_request)
 permissions:
-  contents: write
+  contents: read
+
+env:
+  OFFICIAL_REPO: 'duppjuzo/ExtBridge'
 
 jobs:
   build:
     name: Build APK & Daemon JAR
     runs-on: windows-latest
+    outputs:
+      app_version: ${{ steps.build_apk.outputs.app_version }}
+      apk_name: ${{ steps.build_apk.outputs.apk_name }}
+      artifact_name: ${{ steps.build_apk.outputs.artifact_name }}
+      is_signed: ${{ steps.build_apk.outputs.is_signed }}
+      is_official_repo: ${{ steps.repo_guard.outputs.is_official }}
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Setup JDK 17
-        uses: actions/setup-java@v4
+      - name: Repository Identity & Fork Protection Check
+        id: repo_guard
+        shell: pwsh
+        env:
+          CUR_REPO: ${{ github.repository }}
+          CUR_OWNER: ${{ github.repository_owner }}
+        run: |
+          if ($env:CUR_REPO -ieq $env:OFFICIAL_REPO) {
+            "IS_OFFICIAL_REPO=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            "FORK_SUFFIX=" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            "is_official=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            Write-Host "Verified official repository: $($env:CUR_REPO)"
+          } else {
+            $safeOwner = ($env:CUR_OWNER -replace '[^A-Za-z0-9_.-]', '')
+            if ([string]::IsNullOrWhiteSpace($safeOwner)) { $safeOwner = "unknown" }
+            $suffix = "-unofficial-fork-$safeOwner"
+            "IS_OFFICIAL_REPO=0" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            "FORK_SUFFIX=$suffix" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            "is_official=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            Write-Host "::warning title=Unofficial Fork Repository Detected::当前仓库 ($($env:CUR_REPO)) 非官方主仓 ($($env:OFFICIAL_REPO))。已启用仓库识别保护：自动发布 Release 已锁定仅限官方主仓，Fork 构建产物将自动附加 '$suffix' 标识后缀。"
+          }
+
+      - name: Validate Gradle Wrapper
+        uses: gradle/actions/wrapper-validation@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+
+      - name: Setup JDK 21 & Gradle Cache
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: 'temurin'
-          java-version: '17'
+          java-version: '21'
+          cache: 'gradle'
 
-      - name: Ensure Android SDK Build-Tools & Platform 35
+      - name: Ensure Android SDK Build-Tools & Platform 37.0
         shell: pwsh
         run: |
           $sdk = @($env:ANDROID_HOME, $env:ANDROID_SDK_ROOT) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
           if (-not $sdk) { throw "ANDROID_HOME not found on runner" }
-          if (-not (Test-Path "$sdk\platforms\android-35\android.jar") -or -not (Test-Path "$sdk\build-tools\35.0.0\aapt2.exe")) {
+          if (-not (Test-Path "$sdk\platforms\android-37.0\android.jar") -or -not (Test-Path "$sdk\build-tools\37.0.0\aapt2.exe")) {
             $sdkmgr = Get-ChildItem -Path "$sdk\cmdline-tools" -Recurse -Filter "sdkmanager.bat" -ErrorAction SilentlyContinue |
               Select-Object -First 1 -ExpandProperty FullName
             if ($sdkmgr) {
-              "y`ny`ny`ny`ny`ny`n" | & $sdkmgr "platforms;android-35" "build-tools;35.0.0"
+              "y`ny`ny`ny`ny`ny`n" | & $sdkmgr "platforms;android-37.0" "build-tools;37.0.0"
             }
           }
 
-      - name: Prepare optional signing keystore from Secrets
+      - name: Stage signing keystore file (never export password to GITHUB_ENV)
         shell: pwsh
         env:
-          EXTBRIDGE_KEYSTORE_BASE64: ${{ secrets.EXTBRIDGE_KEYSTORE_BASE64 }}
-          EXTBRIDGE_KEYSTORE_PASS: ${{ secrets.EXTBRIDGE_KEYSTORE_PASS }}
+          KS_B64_PRIMARY: ${{ secrets.EXTBRIDGE_KEYSTORE_BASE64 }}
+          KS_B64_ALT: ${{ secrets.EXTBRIDGEBASE64 }}
+          HAS_KEYSTORE_PASS: ${{ (secrets.EXTBRIDGE_KEYSTORE_PASS != '' || secrets.EXTBRIDGE != '') && '1' || '0' }}
+          IS_RELEASE_PUBLISH: ${{ github.repository == 'duppjuzo/ExtBridge' && (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true' && github.ref == 'refs/heads/main')) && '1' || '0' }}
         run: |
-          if ($env:EXTBRIDGE_KEYSTORE_BASE64) {
-            $ksPath = Join-Path $env:RUNNER_TEMP "exthelper.p12"
-            [IO.File]::WriteAllBytes($ksPath, [Convert]::FromBase64String($env:EXTBRIDGE_KEYSTORE_BASE64.Trim()))
-            "EXTBRIDGE_KEYSTORE=$ksPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-            if ($env:EXTBRIDGE_KEYSTORE_PASS) {
-              "EXTBRIDGE_KEYSTORE_PASS=$($env:EXTBRIDGE_KEYSTORE_PASS)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          if ($env:IS_OFFICIAL_REPO -ne '1') {
+            "EXTBRIDGE_ALLOW_UNSIGNED_RELEASE=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            Write-Host "Fork protection active: skipping official release signing secret staging on $($env:GITHUB_REPOSITORY)."
+            exit 0
+          }
+          $rawB64 = if (-not [string]::IsNullOrWhiteSpace($env:KS_B64_PRIMARY)) { $env:KS_B64_PRIMARY } else { $env:KS_B64_ALT }
+          if ($env:IS_RELEASE_PUBLISH -eq '1') {
+            "EXTBRIDGE_REQUIRE_RELEASE_KEY=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            if (-not $rawB64 -or [string]::IsNullOrWhiteSpace($rawB64) -or $env:HAS_KEYSTORE_PASS -ne '1') {
+              Write-Host "::error title=Missing Release Signing Secrets::请在仓库 Settings -> Secrets and variables -> Actions 中配置 EXTBRIDGEBASE64 (或 EXTBRIDGE_KEYSTORE_BASE64) 与 EXTBRIDGE (或 EXTBRIDGE_KEYSTORE_PASS) 后再触发正式发版。"
+              throw "Refusing to build GitHub Release without keystore Base64 and password secrets!"
             }
-            Write-Host "Using release keystore from GitHub Secrets."
+          }
+          if ($rawB64 -and -not [string]::IsNullOrWhiteSpace($rawB64) -and $env:HAS_KEYSTORE_PASS -eq '1') {
+            $rawLen = $rawB64.Length
+            $miiMatch = [regex]::Match($rawB64, 'MII[A-Za-z0-9+/=\s\-_]{400,}')
+            $candidate = if ($miiMatch.Success) { $miiMatch.Value } else { $rawB64 }
+            $cleanB64 = (($candidate -replace '\s+', '') -replace '-', '+' -replace '_', '/').Trim('"', "'")
+            $rem = $cleanB64.Length % 4
+            if ($rem -eq 2) { $cleanB64 += '==' }
+            elseif ($rem -eq 3) { $cleanB64 += '=' }
+            $startsMii = $cleanB64.StartsWith('MII')
+            try {
+              $ksBytes = [Convert]::FromBase64String($cleanB64)
+              if ($ksBytes.Length -lt 500 -or $ksBytes[0] -ne 0x30) {
+                throw "Decoded bytes length=$($ksBytes.Length) is not a valid PKCS#12 ASN.1 archive (expected ~2534 bytes)."
+              }
+              $ksPath = Join-Path $env:RUNNER_TEMP "exthelper.p12"
+              [IO.File]::WriteAllBytes($ksPath, $ksBytes)
+              "EXTBRIDGE_KEYSTORE=$ksPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+              Write-Host "Staged release keystore from GitHub Secrets ($($ksBytes.Length) bytes)."
+            } catch {
+              $diag = "EXTBRIDGEBASE64 decode failed (rawLen=$rawLen, cleanLen=$($cleanB64.Length), startsWithMII=$startsMii): $($_.Exception.Message)"
+              if ($env:IS_RELEASE_PUBLISH -eq '1') {
+                Write-Host "::error title=Invalid EXTBRIDGEBASE64 Secret::$diag"
+                throw $diag
+              } else {
+                Write-Host "::warning title=Invalid EXTBRIDGEBASE64 Secret::$diag (falling back to unsigned CI verification build)"
+                "EXTBRIDGE_ALLOW_UNSIGNED_RELEASE=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+              }
+            }
           } else {
-            Write-Host "No EXTBRIDGE_KEYSTORE_BASE64 secret configured; build_v3.ps1 will generate temporary debug.keystore."
+            "EXTBRIDGE_ALLOW_UNSIGNED_RELEASE=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            Write-Host "No keystore secrets configured; non-release CI will produce unsigned verification APK only."
           }
 
       - name: Build ExtBridge APK
+        id: build_apk
         shell: pwsh
+        env:
+          KS_PASS_PRIMARY: ${{ secrets.EXTBRIDGE_KEYSTORE_PASS }}
+          KS_PASS_ALT: ${{ secrets.EXTBRIDGE }}
         run: |
+          $env:EXTBRIDGE_KEYSTORE_PASS = if (-not [string]::IsNullOrWhiteSpace($env:KS_PASS_PRIMARY)) { $env:KS_PASS_PRIMARY } else { $env:KS_PASS_ALT }
           powershell -ExecutionPolicy Bypass -File .\build_v3.ps1
-          [xml]$manifest = Get-Content -Path ".\helper\AndroidManifest.xml" -Encoding UTF8
-          $ver = $manifest.manifest.versionName
-          if (-not $ver) { $ver = "3.1.0" }
-          Copy-Item -Path ".\build\out\exthelper.apk" -Destination ".\build\out\ExtBridge_v$ver.apk" -Force
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $ver = $null
+          if (Test-Path ".\helper\build.gradle.kts") {
+            $kts = Get-Content -Raw -Path ".\helper\build.gradle.kts" -Encoding UTF8
+            if ($kts -match 'versionName\s*=\s*"([^"]+)"') { $ver = $Matches[1] }
+          }
+          if (-not $ver) { $ver = "3.5.6" }
+          $forkTag = if ($env:FORK_SUFFIX) { $env:FORK_SUFFIX } else { "" }
+          $artifactName = "ExtBridge_v$ver$forkTag"
+          $relDoc = ".\docs\RELEASE_v$ver.md"
+          if (Test-Path $relDoc) {
+            Copy-Item -Path $relDoc -Destination ".\build\out\RELEASE_NOTES.md" -Force
+          } else {
+            "# ExtBridge v$ver`n`n详见 [CHANGELOG.md](https://github.com/duppjuzo/ExtBridge/blob/main/CHANGELOG.md)。" | Set-Content -Path ".\build\out\RELEASE_NOTES.md" -Encoding UTF8
+          }
+          if ((Test-Path ".\build\out\exthelper.apk") -and ($env:IS_OFFICIAL_REPO -eq '1')) {
+            $apkName = "ExtBridge_v$ver.apk"
+            Copy-Item -Path ".\build\out\exthelper.apk" -Destination ".\build\out\$apkName" -Force
+            "APK_PATH=build/out/$apkName" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            "apk_name=$apkName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            "is_signed=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          } elseif (Test-Path ".\build\out\exthelper.apk") {
+            $apkName = "ExtBridge_v$ver$forkTag.apk"
+            Copy-Item -Path ".\build\out\exthelper.apk" -Destination ".\build\out\$apkName" -Force
+            "APK_PATH=build/out/$apkName" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            "apk_name=$apkName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            "is_signed=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          } elseif (Test-Path ".\build\out\exthelper-unsigned.apk") {
+            if ($env:EXTBRIDGE_REQUIRE_RELEASE_KEY -eq '1') {
+              throw "Release publish requires signed exthelper.apk, but only unsigned APK was found!"
+            }
+            $apkName = "ExtBridge_v$ver$forkTag-unsigned.apk"
+            Copy-Item -Path ".\build\out\exthelper-unsigned.apk" -Destination ".\build\out\$apkName" -Force
+            "APK_PATH=build/out/$apkName" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            "apk_name=$apkName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            "is_signed=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          } else {
+            throw "No output APK found in build/out!"
+          }
           "APP_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "APK_PATH=build/out/ExtBridge_v$ver.apk" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "app_version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "artifact_name=$artifactName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           Get-ChildItem ".\build\out" | Select-Object Name, Length
 
       - name: Cleanup temporary keystore
@@ -93,22 +206,70 @@ jobs:
           if (Test-Path $ksPath) { Remove-Item -Force $ksPath }
 
       - name: Upload Build Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ExtBridge_v${{ env.APP_VERSION }}
+          name: ${{ steps.build_apk.outputs.artifact_name }}
           path: |
             ${{ env.APK_PATH }}
             build/out/extbridge.jar
+            build/out/RELEASE_NOTES.md
+          if-no-files-found: error
           retention-days: 90
 
-      - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.create_release == 'true'
-        uses: softprops/action-gh-release@v2
+  release:
+    name: Publish Official GitHub Release
+    needs: build
+    if: >-
+      github.repository == 'duppjuzo/ExtBridge' &&
+      needs.build.outputs.is_official_repo == 'true' &&
+      (
+        startsWith(github.ref, 'refs/tags/v') ||
+        (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true' && github.ref == 'refs/heads/main')
+      )
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Verify official repository & release preconditions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IS_SIGNED: ${{ needs.build.outputs.is_signed }}
+          APK_NAME: ${{ needs.build.outputs.apk_name }}
+          TARGET_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v{0}', needs.build.outputs.app_version) }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ "$REPO" != "$OFFICIAL_REPO" ]; then
+            echo "::error::Repository identity protection: automated GitHub Releases are restricted to $OFFICIAL_REPO (current: $REPO)."
+            exit 1
+          fi
+          if [ "$IS_SIGNED" != "true" ] || echo "$APK_NAME" | grep -Eq "unsigned|unofficial-fork"; then
+            echo "::error::Refusing to publish unsigned or unofficial APK ($APK_NAME) to GitHub Releases."
+            exit 1
+          fi
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if gh api "repos/$REPO/releases/tags/$TARGET_TAG" >/dev/null 2>&1; then
+              echo "::error::Release for tag $TARGET_TAG already exists; refusing to overwrite existing release via workflow_dispatch."
+              exit 1
+            fi
+          fi
+
+      - name: Download Verified Release Artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v{0}', env.APP_VERSION) }}
-          name: ExtBridge v${{ env.APP_VERSION }}
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v{0}', needs.build.outputs.app_version) }}
+          name: ExtBridge v${{ needs.build.outputs.app_version }}
+          body_path: dist/RELEASE_NOTES.md
           generate_release_notes: true
-          prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') || contains(github.ref_name, 'rc') }}
+          fail_on_unmatched_files: true
           files: |
-            ${{ env.APK_PATH }}
-            build/out/extbridge.jar
+            dist/${{ needs.build.outputs.apk_name }}
+            dist/extbridge.jar

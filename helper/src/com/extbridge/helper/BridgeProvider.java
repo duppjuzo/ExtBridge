@@ -13,6 +13,7 @@ public class BridgeProvider extends ContentProvider {
 
     @Override
     public boolean onCreate() {
+        AdbBootstrap.initialize(getContext());
         return true;
     }
 
@@ -29,17 +30,42 @@ public class BridgeProvider extends ContentProvider {
             denied.putBoolean("ok", false);
             return denied;
         }
+        // BEGIN DAEMON_STATUS_DIAGNOSTICS
+        if ("stopForActivation".equals(method)) {
+            Bundle result = new Bundle();
+            if (arg == null || !arg.matches("[a-zA-Z0-9_-]{16,80}")) { result.putBoolean("stopped", false); return result; }
+            result.putBoolean("stopped", BridgeClient.shutdownDaemon());
+            return result;
+        }
+        if ("getNativeAdbInfo".equals(method)) return AdbBootstrap.nativeAdbDiagnostics(getContext());
+        if ("getDaemonStatus".equals(method)) {
+            BridgeClient.Status status = BridgeClient.getStatus();
+            if (!status.connected) BridgeClient.requestBinder(getContext());
+            Bundle result = new Bundle();
+            // A cold app process has no cached Binder, even when the daemon is alive.
+            // Keep the legacy boolean, but expose whether its state is actually known.
+            result.putString("connection_state", status.connected ? "CONNECTED" : "UNKNOWN");
+            result.putBoolean("connected", status.connected);
+            result.putInt("daemon_pid", status.daemonPid);
+            result.putInt("daemon_uid", status.daemonUid);
+            result.putBoolean("handshake_verified", status.handshakeVerified);
+            result.putInt("external_input_count", status.extInputCnt);
+            result.putInt("inject_status", status.injectStatus);
+            result.putInt("external_display_id", status.extId);
+            result.putString("activation_token", status.activationToken);
+            result.putBoolean("protocol_compatible", status.protocolCompatible);
+            result.putBoolean("auto_root_enabled", AdbBootstrap.isAutoRootEnabled(getContext()));
+            result.putInt("app_pid", android.os.Process.myPid());
+            result.putInt("app_uid", android.os.Process.myUid());
+            result.putString("issue", status.connected || !status.connectionIssue.isEmpty()
+                    ? status.connectionIssue : "尚未确认后台服务状态，已请求重新连接，请稍后重试");
+            AdbBootstrap.diagnostics(result);
+            return result;
+        }
+        // END DAEMON_STATUS_DIAGNOSTICS
         if ("setBinder".equals(method) && extras != null) {
-            if (BridgeService.sUserStopping) {
-                Bundle denied = new Bundle();
-                denied.putBoolean("ok", false);
-                return denied;
-            }
             IBinder b = extras.getBinder("cb");
-            if (b != null && b.pingBinder()) {
-                BridgeClient.setBinder(b);
-                BridgeService.ensureStarted(getContext());
-                BridgeService.refreshFromReceiver(getContext());
+            if (BridgeClient.receiveDaemonBinder(getContext(), b)) {
                 Bundle ok = new Bundle();
                 ok.putBoolean("ok", true);
                 ok.putBinder("proc", sProcToken);

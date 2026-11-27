@@ -17,6 +17,7 @@ public class AdbPairingReceiver extends BroadcastReceiver {
         if (intent == null) return;
         String action = intent.getAction();
         if (AdbBootstrap.ACTION_STOP_PAIR_NOTIF.equals(action)) {
+            AdbBootstrap.cancelNotificationActivation();
             AdbBootstrap.cancelPairingNotification(context);
             return;
         }
@@ -33,7 +34,9 @@ public class AdbPairingReceiver extends BroadcastReceiver {
 
         final PendingResult pr = goAsync();
         final Context appCtx = context.getApplicationContext();
-        AdbBootstrap.showPairingNotification(appCtx, "正在用配对码 " + text + " 配对并启动 ExtBridge...");
+        BridgeService.ensureStarted(appCtx);
+        AdbBootstrap.startDiscovery(appCtx, null);
+        AdbBootstrap.showPairingNotification(appCtx, "正在配对并准备激活…");
         AdbBootstrap.pairFromNotificationAsync(appCtx, text, new AdbBootstrap.ProgressListener() {
             @Override
             public void onStep(String message) {
@@ -42,20 +45,25 @@ public class AdbPairingReceiver extends BroadcastReceiver {
 
             @Override
             public void onResult(boolean success, String message) {
-                try {
-                    Toast.makeText(appCtx, message, Toast.LENGTH_LONG).show();
-                    if (success && BridgeClient.getStatus().connected) {
-                        AdbBootstrap.cancelPairingNotification(appCtx);
-                        Intent launch = new Intent(appCtx, MainActivity.class);
-                        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-                        appCtx.startActivity(launch);
-                    } else {
-                        AdbBootstrap.showPairingNotification(appCtx, message);
+                AdbBootstrap.showPairingNotification(appCtx, message);
+            }
+            @Override
+            public void onActivationResult(ActivationFlow.Result result) {
+                // The staged flow has verified this request's token and PID, not an unrelated old service.
+                if (result.activated()) {
+                    BridgeClient.Status status = BridgeClient.getStatus();
+                    ActivationFlow.Probe probe = new ActivationFlow.Probe(status.connected, status.handshakeVerified,
+                            status.protocolCompatible, status.daemonPid, status.daemonUid, status.activationToken, status.connectionIssue);
+                    if (!ActivationFlow.owns(probe, result.token, result.pid)) {
+                        AdbBootstrap.showPairingNotification(appCtx, "服务状态已改变，请重新检查");
+                        return;
                     }
-                } finally {
-                    pr.finish();
-                }
+                    AdbBootstrap.cancelPairingNotification(appCtx);
+                    Toast.makeText(appCtx, "本次激活成功", Toast.LENGTH_LONG).show();
+                } else AdbBootstrap.showPairingNotification(appCtx, result.message);
             }
         });
+        // The foreground service owns the long operation; never retain a broadcast for 60+ seconds.
+        pr.finish();
     }
 }
